@@ -1,136 +1,89 @@
-import asyncio
+# scraper.py
+from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs
-from playwright.async_api import async_playwright
-from sheets import save_to_sheet
-from config import HEADLESS, WAIT_TIMEOUT, SHEET_NAME, CREDS_FILE
+import time
+import sheets
 
+def run_scraper():
+    print("Fetching URLs from Google Sheets...")
+    urls = sheets.get_urls()
+    
+    if not urls:
+        print("No URLs found to process.")
+        return
 
-# --- Step 1: collect all ad URLs from advertiser page ---
-async def get_all_ad_urls(advertiser_url, page):
-    print(f"\n📋 Collecting ad URLs from: {advertiser_url}")
-    await page.goto(advertiser_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3000)
+    with sync_playwright() as p:
+        # headless=False lets you watch the browser locally
+        browser = p.chromium.launch(headless=False) 
+        context = browser.new_context()
 
-    ad_urls = set()
-    previous_count = 0
-    no_change_count = 0
+        for index, url in enumerate(urls):
+            row_num = index + 2  # +2 because index is 0-based and row 1 is headers
+            print(f"--- Processing Row {row_num} ---")
+            
+            page = context.new_page()
+            captured_video_id = "N/A"
 
-    while True:
-        # collect all creative links visible on page
-        links = await page.eval_on_selector_all(
-            'a[href*="/creative/"]',
-            'elements => elements.map(el => el.href)'
-        )
+            # 1. Setup Network Interception
+            def handle_request(request):
+                nonlocal captured_video_id
+                if "googlevideo.com/videoplayback" in request.url:
+                    try:
+                        # Extract the 'id' parameter from the Google Video URL
+                        parsed_url = urlparse(request.url)
+                        video_id = parse_qs(parsed_url.query).get('id', [None])[0]
+                        if video_id:
+                            captured_video_id = video_id
+                            print(f"✅ Intercepted Video ID: {captured_video_id}")
+                    except Exception as e:
+                        pass
 
-        for link in links:
-            ad_urls.add(link)
+            # Attach the interceptor to the page
+            page.on("request", handle_request)
 
-        print(f"   Found {len(ad_urls)} ads so far...")
+            try:
+                # 2. Navigate to the Ad Center URL
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                
+                # 3. Scrape the DOM Elements
+                # NOTE: These selectors need to be adjusted to match Google's current layout
+                try:
+                    advertiser = page.locator('div.advertiser-name-selector').first.inner_text(timeout=5000)
+                except:
+                    advertiser = "N/A"
+                    
+                try:
+                    ad_name = page.locator('h1.ad-title-selector').first.inner_text(timeout=5000)
+                except:
+                    ad_name = "N/A"
+                    
+                try:
+                    app_link = page.locator('a[href*="play.google.com"], a[href*="apps.apple.com"]').first.get_attribute('href', timeout=5000)
+                except:
+                    app_link = "N/A"
 
-        # stop if no new ads found after 3 scrolls
-        if len(ad_urls) == previous_count:
-            no_change_count += 1
-            if no_change_count >= 3:
-                print(f"✅ Done collecting — total {len(ad_urls)} ads found")
-                break
-        else:
-            no_change_count = 0
+                # 4. Find the Play Button and trigger the network request
+                play_button = page.locator('button:has-text("play_arrow"), [aria-label*="Play"]').first
+                if play_button.count() > 0:
+                    print("Found play button, clicking...")
+                    play_button.click()
+                    time.sleep(4) # Give the network request time to fire
+                else:
+                    print("No play button found, ad might be autoplaying or is an image.")
+                    time.sleep(2) # Brief pause just in case
 
-        previous_count = len(ad_urls)
+                # 5. Save the data
+                data = [advertiser, ad_name, url, app_link, captured_video_id]
+                sheets.update_row(row_num, data)
+                print(f"💾 Saved to Sheet: {data}")
 
-        # scroll down to load more ads
-        await page.evaluate("window.scrollBy(0, 1500)")
-        await page.wait_for_timeout(2000)
+            except Exception as e:
+                print(f"❌ Error processing {url}: {e}")
+            finally:
+                page.close()
 
-    return list(ad_urls)
+        print("Finished processing all URLs.")
+        browser.close()
 
-
-# --- Step 2: scrape one individual ad ---
-async def scrape_ad(url, page):
-    result = {
-        "advertiser": "",
-        "name": "",
-        "ad_url": url,
-        "app_link": "",
-        "video_id": ""
-    }
-
-    async def on_request(request):
-        if "googlevideo.com" in request.url and "videoplayback" in request.url:
-            parsed = urlparse(request.url)
-            params = parse_qs(parsed.query)
-            vid = params.get("id", [""])[0]
-            if vid:
-                result["video_id"] = vid
-                print(f"   ✅ Video ID: {vid}")
-
-    page.on("request", on_request)
-
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3000)
-
-    # get advertiser name
-    try:
-        result["advertiser"] = await page.inner_text(".advertiser-title")
-    except:
-        print("   ⚠️  Advertiser name not found")
-
-    # get ad name if available
-    try:
-        result["name"] = await page.inner_text(".creative-title")
-    except:
-        pass
-
-    # click play button
-    try:
-        await page.wait_for_selector('.play-button-image', timeout=15000)
-        await page.click('.play-button')
-        await page.wait_for_timeout(WAIT_TIMEOUT)
-        print("   ✅ Play button clicked")
-    except:
-        print("   ⚠️  Play button not found — skipping video ID")
-
-    # get app link
-    try:
-        result["app_link"] = await page.get_attribute("a.cta-button", "href")
-    except:
-        pass
-
-    # remove listener to avoid duplicates on next ad
-    page.remove_listener("request", on_request)
-
-    return result
-
-
-# --- Step 3: main loop ---
-async def main():
-    # ✏️ paste your advertiser base URL here — no /creative/CR... part
-    ADVERTISER_URL = "https://adstransparency.google.com/advertiser/AR04661836496116908033?region=PK"
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=HEADLESS)
-        page = await browser.new_page()
-
-        # collect all ad URLs from advertiser page
-        ad_urls = await get_all_ad_urls(ADVERTISER_URL, page)
-
-        if not ad_urls:
-            print("❌ No ad URLs found — check the advertiser URL")
-            await browser.close()
-            return
-
-        print(f"\n🚀 Starting to scrape {len(ad_urls)} ads...\n")
-
-        # scrape each ad one by one
-        for i, url in enumerate(ad_urls, 1):
-            print(f"🔍 [{i}/{len(ad_urls)}] Scraping: {url}")
-            data = await scrape_ad(url, page)
-            print(f"   Data: {data}")
-            save_to_sheet(data)
-            await asyncio.sleep(2)
-
-        await browser.close()
-        print("\n✅ All done! Check your Google Sheet.")
-
-
-asyncio.run(main())
+if __name__ == "__main__":
+    run_scraper()
