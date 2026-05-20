@@ -43,7 +43,12 @@ def run_scraper():
 
             try:
                 # 2. Navigate to the Ad Center URL
-                page.goto(url, wait_until="networkidle", timeout=60000)
+                # 2. Navigate to the Ad Center URL
+                # "domcontentloaded" finishes as soon as the HTML arrives, ignoring background trackers
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                
+                # Give the heavy JavaScript framework a brief moment to render the UI components
+                time.sleep(2)
                 
                 # 3. Scrape the DOM Elements
                 # NOTE: These selectors need to be adjusted to match Google's current layout
