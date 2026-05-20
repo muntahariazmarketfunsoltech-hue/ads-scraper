@@ -37,7 +37,38 @@ def run_scraper():
                             print(f"✅ Intercepted Video ID: {captured_video_id}")
                     except Exception as e:
                         pass
+# 1. Setup Network Interception (Upgraded)
+            def handle_request(request):
+                nonlocal captured_video_id
+                url = request.url
+                
+                # Catch 1: Standard YouTube Embeds (Most common in Ad Center)
+                if "youtube.com/embed/" in url:
+                    try:
+                        vid = url.split("youtube.com/embed/")[1].split("?")[0]
+                        if vid: captured_video_id = vid
+                    except: pass
+                    
+                # Catch 2: YouTube Watch URLs
+                elif "youtube.com/watch" in url:
+                    try:
+                        parsed_url = urlparse(url)
+                        vid = parse_qs(parsed_url.query).get('v', [None])[0]
+                        if vid: captured_video_id = vid
+                    except: pass
+                    
+                # Catch 3: Raw Google Video Streams
+                elif "googlevideo.com/videoplayback" in url:
+                    try:
+                        parsed_url = urlparse(url)
+                        query_params = parse_qs(parsed_url.query)
+                        vid = query_params.get('docid', query_params.get('id', [None]))[0]
+                        if vid and captured_video_id == "N/A":
+                            captured_video_id = vid
+                    except: pass
 
+            # Attach the interceptor to the page
+            page.on("request", handle_request)
             # Attach the interceptor to the page
             page.on("request", handle_request)
 
@@ -67,10 +98,7 @@ def run_scraper():
                 except:
                     app_link = "N/A"
 
-                # 4. Find the Play Button and trigger the network request
-               # 4. Find the Play Button and trigger the network request
-                # Updated to look for the specific div classes from your screenshot
-               # 4. Robust Play Button Trigger (Fallback Chain)
+                # 4. 
                 click_success = False
                 
                 # List of locators, ordered from most specific to the broadest brute-force option
@@ -103,7 +131,38 @@ def run_scraper():
 
                 if not click_success:
                     print("No clickable target found. It is likely a static image ad.")
+# 4. Robust Play Button Trigger (Fallback Chain)
+                click_success = False
+                click_strategies = [
+                    page.locator('div.play-button, div.play-button-image').first, 
+                    page.locator('svg').locator('..').first, 
+                    page.locator('div[jscontroller], div[role="main"], iframe').first 
+                ]
 
+                for target in click_strategies:
+                    try:
+                        if target.count() > 0 and target.is_visible(timeout=2000):
+                            print("▶️ Target acquired, clicking play...")
+                            target.click(force=True) 
+                            
+                            # SMART WAIT: Wait up to 10 seconds for the network to catch the ID
+                            wait_time = 0
+                            while captured_video_id == "N/A" and wait_time < 10:
+                                time.sleep(0.5)
+                                wait_time += 0.5
+                                
+                            if captured_video_id != "N/A":
+                                print(f"✅ Intercepted Video ID: {captured_video_id} (took {wait_time}s)")
+                                
+                            click_success = True
+                            break 
+                    except Exception:
+                        continue 
+
+                if not click_success:
+                    print("⏭️ No clickable target found. Likely a static image ad.")
+
+               
                 # 5. Save the data
               # 5. Save the data ONLY if it is a video ad
                 if captured_video_id != "N/A":
