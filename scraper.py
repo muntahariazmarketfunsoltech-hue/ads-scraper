@@ -63,7 +63,9 @@ def run_scraper():
                     app_link = "N/A"
 
                 # 4. Find the Play Button and trigger the network request
-                play_button = page.locator('button:has-text("play_arrow"), [aria-label*="Play"]').first
+               # 4. Find the Play Button and trigger the network request
+                # Updated to look for the specific div classes from your screenshot
+                play_button = page.locator('div.play-button, div.play-button-image').first
                 if play_button.count() > 0:
                     print("Found play button, clicking...")
                     play_button.click()
