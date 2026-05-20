@@ -65,15 +65,39 @@ def run_scraper():
                 # 4. Find the Play Button and trigger the network request
                # 4. Find the Play Button and trigger the network request
                 # Updated to look for the specific div classes from your screenshot
-                play_button = page.locator('div.play-button, div.play-button-image').first
-                if play_button.count() > 0:
-                    print("Found play button, clicking...")
-                    play_button.click()
-                    # Change time.sleep(4) to this:
-                    time.sleep(config.WAIT_TIMEOUT) # Give the network request time to fire
-                else:
-                    print("No play button found, ad might be autoplaying or is an image.")
-                    time.sleep(2) # Brief pause just in case
+               # 4. Robust Play Button Trigger (Fallback Chain)
+                click_success = False
+                
+                # List of locators, ordered from most specific to the broadest brute-force option
+                click_strategies = [
+                    # Strategy 1: The exact known classes
+                    page.locator('div.play-button, div.play-button-image').first, 
+                    
+                    # Strategy 2: Look for any container that is directly wrapping an SVG icon (often the play triangle)
+                    page.locator('svg').locator('..').first, 
+                    
+                    # Strategy 3: Brute force - find the main visual area of the page and click the center
+                    page.locator('div[jscontroller], div[role="main"], iframe').first 
+                ]
+
+                for target in click_strategies:
+                    try:
+                        # Check if this specific target exists and is visible
+                        if target.count() > 0 and target.is_visible(timeout=2000):
+                            print("Target acquired, attempting click...")
+                            
+                            # force=True tells Playwright to click even if Google placed an invisible overlay on top to block bots
+                            target.click(force=True) 
+                            
+                            time.sleep(config.WAIT_TIMEOUT)
+                            click_success = True
+                            break # Success! Exit the fallback loop and proceed to save the data
+                    except Exception:
+                        # If this strategy fails, silently catch the error and move to the next target in the list
+                        continue 
+
+                if not click_success:
+                    print("No clickable target found. It is likely a static image ad.")
 
                 # 5. Save the data
               # 5. Save the data ONLY if it is a video ad
