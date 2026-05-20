@@ -1,8 +1,8 @@
-# scraper.py
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs
 import time
 import sheets
+import config # <--- Add this line
 
 def run_scraper():
     print("Fetching URLs from Google Sheets...")
@@ -13,8 +13,8 @@ def run_scraper():
         return
 
     with sync_playwright() as p:
-        # headless=False lets you watch the browser locally
-        browser = p.chromium.launch(headless=False) 
+       
+        browser = p.chromium.launch(headless=config.HEADLESS)
         context = browser.new_context()
 
         for index, url in enumerate(urls):
@@ -67,15 +67,20 @@ def run_scraper():
                 if play_button.count() > 0:
                     print("Found play button, clicking...")
                     play_button.click()
-                    time.sleep(4) # Give the network request time to fire
+                    # Change time.sleep(4) to this:
+                    time.sleep(config.WAIT_TIMEOUT) # Give the network request time to fire
                 else:
                     print("No play button found, ad might be autoplaying or is an image.")
                     time.sleep(2) # Brief pause just in case
 
                 # 5. Save the data
-                data = [advertiser, ad_name, url, app_link, captured_video_id]
-                sheets.update_row(row_num, data)
-                print(f"💾 Saved to Sheet: {data}")
+              # 5. Save the data ONLY if it is a video ad
+                if captured_video_id != "N/A":
+                    data = [advertiser, ad_name, url, app_link, captured_video_id]
+                    sheets.update_row(row_num, data)
+                    print(f"💾 Saved Video Ad to Sheet: {data}")
+                else:
+                    print(f"⏭️ Skipped (Not a video ad): {url}")
 
             except Exception as e:
                 print(f"❌ Error processing {url}: {e}")
