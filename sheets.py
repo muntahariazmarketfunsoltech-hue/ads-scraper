@@ -23,21 +23,7 @@ def get_urls():
         return records[1:] # Skip the 'transparency_url' header in row 1
     return []
 
-
 def update_row(row_index, data):
-    """
-    Writes data back to Columns A through F.
-    data format: [advertiser, name, ad_url, app_link, video_id, timestamp]
-    """
     sheet = get_sheet()
-
-    # Make sure data has exactly 6 columns
-    data = list(data)
-    while len(data) < 6:
-        data.append("N/A")
-    data = data[:6]
-
-    cell_range = f"A{row_index}:F{row_index}"
-    print(f"📝 Writing to sheet range {cell_range}: {data}")
-    sheet.update(range_name=cell_range, values=[data])
-    print(f"✅ Sheet updated successfully: row {row_index}")
+    cell_range = f"A{row_index}:E{row_index}"
+    sheet.update(cell_range, [data])

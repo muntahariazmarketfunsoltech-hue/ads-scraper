@@ -3,7 +3,7 @@ from urllib.parse import urlparse, parse_qs
 import re
 import sheets
 import config
-from datetime import datetime
+
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
 
@@ -336,10 +336,9 @@ def run_scraper():
                     video_id = captured["video_id"]
 
                 if video_id != "N/A":
-                   timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # e.g., 2026-05-21 14:32:10
-                   data = [advertiser, ad_name, url, app_link, video_id, timestamp]
-                   sheets.update_row(row_num, data)
-                   print(f"✅ Video ad saved to sheet row {row_num} with timestamp {timestamp}")
+                    data = [advertiser, ad_name, url, app_link, video_id]  # A-E only
+                    sheets.update_row(row_num, data)
+                    print(f"✅ Video ad saved to sheet row {row_num}")
                 else:
                     print("⏭ Static/non-video ad skipped. Nothing written.")
 
