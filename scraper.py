@@ -1,6 +1,7 @@
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 import re
 import sheets
 import config
@@ -64,193 +65,121 @@ def click_possible_video_targets(page):
             elements = page.locator(sel)
             for i in range(elements.count()):
                 el = elements.nth(i)
-                if el.is_visible():
-                    try:
-                        el.scroll_into_view_if_needed(timeout=2000)
-                        box = el.bounding_box()
-                        if box and box["y"] >= 0 and box["width"] >= 180 and box["height"] >= 120:
-                            x = box["x"] + box["width"] / 2
-                            y = box["y"] + box["height"] / 2
-                            page.mouse.click(x, y)
-                            page.wait_for_timeout(1500)
-                            return True
-                    except:
-                        continue
+                try:
+                    el.scroll_into_view_if_needed(timeout=1000)
+                    box = el.bounding_box()
+                    if box and box["width"] >= 100 and box["height"] >= 100:
+                        x = box["x"] + box["width"] / 2
+                        y = box["y"] + box["height"] / 2
+                        page.mouse.click(x, y)
+                        page.wait_for_timeout(1000)
+                        return True
+                except:
+                    continue
         except:
             continue
     viewport = page.viewport_size or {"width": 1366, "height": 768}
     page.mouse.click(viewport["width"] / 2, viewport["height"] / 2)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(1000)
     return False
 
 
-def get_raw_install_href(page):
-    """Get the raw href from the install/download button anchor inside the ad iframe."""
-    for frame in page.frames:
-        try:
-            href = frame.eval_on_selector(
-                "a.install-button-anchor, a[id*='install-button'], a[class*='install-button']",
-                "el => el.getAttribute('href')"
-            )
-            if href and href.strip():
-                return href.strip()
-        except Exception:
-            continue
-
-    # Fallback: any anchor pointing to googleleadservices or store
-    for frame in page.frames:
-        try:
-            hrefs = frame.eval_on_selector_all(
-                "a[href]",
-                "els => els.map(el => el.getAttribute('href'))"
-            )
-            for href in hrefs:
-                if not href:
-                    continue
-                low = href.lower()
-                if "googleleadservices.com" in low or "play.google.com/store" in low or "apps.apple.com" in low:
-                    return href.strip()
-        except Exception:
-            continue
-    return None
+def scan_html_for_app_link(page):
+    """
+    Scans the raw HTML for all Play Store links and returns the most frequent one.
+    This bypasses all UI and iframe issues entirely.
+    """
+    try:
+        content = page.content()
+        # Strict regex requiring a dot to prevent grabbing developer names
+        play_matches = re.findall(r'https://play\.google\.com/store/apps/details\?id=([a-zA-Z0-9_]+\.[a-zA-Z0-9_.]+)', content)
+        if play_matches:
+            # Filter out standard google services that sometimes appear in tracking code
+            filtered = [p for p in play_matches if p.lower() != 'com.google.android.gms']
+            if filtered:
+                most_common_pkg = Counter(filtered).most_common(1)[0][0]
+                return f"https://play.google.com/store/apps/details?id={most_common_pkg}"
+        
+        apple_matches = re.findall(r'https://apps\.apple\.com/[a-zA-Z0-9/\-?=&_.%]+', content)
+        if apple_matches:
+            return re.split(r'["\'\s<>]', apple_matches[0])[0]
+    except Exception:
+        pass
+    return "N/A"
 
 
 def click_install_button_and_capture(page, context):
     """
-    Actually click the Install/Download button inside the ad iframe and
-    intercept the new tab / navigation it triggers — that URL IS the final
-    app store link, no parsing needed.
+    Force-clicks the Install button and captures the resulting URL.
     """
     app_url = {"value": None}
 
-    # Listen for any new page (new tab) opened by the click
     def on_page(new_page):
         try:
-            new_page.wait_for_load_state("commit", timeout=15000)
-            url = new_page.url
-            if url and url != "about:blank":
-                app_url["value"] = url
-            new_page.close()
+            new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+            new_page.wait_for_timeout(2000) 
+            if new_page.url and new_page.url != "about:blank":
+                app_url["value"] = new_page.url
         except Exception:
             try:
-                url = new_page.url
-                if url and url != "about:blank":
-                    app_url["value"] = url
+                if new_page.url and new_page.url != "about:blank":
+                    app_url["value"] = new_page.url
+            except:
+                pass
+        finally:
+            try:
                 new_page.close()
-            except Exception:
+            except:
                 pass
 
     context.on("page", on_page)
-
     clicked = False
+
+    # Force click anything that looks like an install anchor
     for frame in page.frames:
         try:
-            anchor = frame.locator(
-                "a.install-button-anchor, a[id*='install-button'], a[class*='install-button']"
-            ).first
-            if anchor.count() == 0:
-                continue
-            anchor.scroll_into_view_if_needed(timeout=3000)
-            # Open in same tab so we capture the navigation
-            frame.evaluate(
-                "el => { el.removeAttribute('target'); }",
-                anchor.element_handle()
-            )
-            anchor.click(timeout=5000)
-            clicked = True
-            break
+            ctas = frame.locator("text='Install', text='Download', a.install-button-anchor, a[id*='install-button']")
+            for i in range(ctas.count()):
+                cta = ctas.nth(i)
+                try:
+                    cta.scroll_into_view_if_needed(timeout=1000)
+                    # force=True bypasses the strict visibility checks
+                    cta.click(force=True, timeout=3000)
+                    clicked = True
+                    break
+                except:
+                    continue
+            if clicked:
+                break
         except Exception:
             continue
 
-    if not clicked:
-        # Try generic install/download button text
-        for frame in page.frames:
-            try:
-                btn = frame.locator("text=Install, text=Download").first
-                if btn.count() == 0:
-                    continue
-                btn.scroll_into_view_if_needed(timeout=2000)
-                btn.click(timeout=5000)
-                clicked = True
-                break
-            except Exception:
-                continue
-
     if clicked:
-        # Wait for new tab to appear and be captured
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(4000) 
 
     context.remove_listener("page", on_page)
     return app_url["value"]
 
+def clean_store_link(url):
+    if not url:
+        return None
+    low = url.lower()
+    if "play.google.com" in low and "/apps/details" in low:
+        pkg_match = re.search(r'[?&]id=([a-zA-Z0-9_]+\.[a-zA-Z0-9_.]+)', url)
+        if pkg_match:
+            return f"https://play.google.com/store/apps/details?id={pkg_match.group(1)}"
+    elif "apps.apple.com" in low:
+        return re.split(r'["\'\s<>]', url)[0]
+    return None
 
 def parse_app_link_from_href(raw_href):
-    """
-    Properly parse the googleleadservices URL to extract the destination
-    app store URL. The actual destination is in the 'adurl' query parameter
-    (URL-encoded). We decode it layer by layer until we find a Play Store
-    or App Store URL.
-    """
     if not raw_href:
         return None
-
-    # Decode up to 3 layers
     text = raw_href
     for _ in range(3):
         text = unquote(text)
-
-    # Now look for play.google.com or apps.apple.com in the decoded string
-    # Match the full URL up to a whitespace, quote, or unrelated param
-    play_match = re.search(
-        r'https://play\.google\.com/store/apps/details\?id=([a-zA-Z][a-zA-Z0-9_.]+)',
-        text
-    )
-    if play_match:
-        pkg = play_match.group(1).rstrip("&%+")
-        # Trim any junk after the package name (package names are only word chars + dots)
-        pkg = re.match(r'[a-zA-Z][a-zA-Z0-9_.]+', pkg).group(0).rstrip(".")
-        return f"https://play.google.com/store/apps/details?id={pkg}"
-
-    apple_match = re.search(
-        r'https://apps\.apple\.com/[a-zA-Z0-9/\-?=&_.%]+',
-        text
-    )
-    if apple_match:
-        url = apple_match.group(0)
-        # Cut at first unrelated character
-        url = re.split(r'["\'\s<>]', url)[0]
-        return url
-
-    return None
-
-
-def extract_app_store_link(page, context):
-    """
-    Main entry point. Uses two strategies and returns the best result:
-    1. Click the install button and intercept where it actually navigates (most accurate).
-    2. Parse the href directly (fast fallback).
-    """
-    # Strategy 1: click and intercept navigation — most accurate
-    clicked_url = click_install_button_and_capture(page, context)
-    if clicked_url:
-        low = clicked_url.lower()
-        if "play.google.com/store" in low or "apps.apple.com" in low:
-            # Clean up — keep only the id= param for Play Store
-            if "play.google.com" in low:
-                pkg_match = re.search(r'[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)', clicked_url)
-                if pkg_match:
-                    pkg = pkg_match.group(1).rstrip("&%+.")
-                    return f"https://play.google.com/store/apps/details?id={pkg}"
-            return clicked_url
-
-    # Strategy 2: parse the href directly
-    raw_href = get_raw_install_href(page)
-    print(f"    raw href (parse fallback): {(raw_href or '')[:120]}")
-    parsed = parse_app_link_from_href(raw_href)
-    if parsed:
-        return parsed
-
-    return "N/A"
+    
+    return clean_store_link(text)
 
 
 def scrape_single_url(url_row):
@@ -259,30 +188,41 @@ def scrape_single_url(url_row):
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1366, "height": 768})
         page = context.new_page()
-        captured = {"video_id": "N/A"}
+        
+        captured = {"video_id": "N/A", "app_link": "N/A"}
 
+        # 1. NETWORK SNIFFING: Catch App links and Videos directly from background traffic
         def handle_request(req):
-            vid = extract_video_id_from_url(req.url)
-            if vid and captured["video_id"] == "N/A":
-                captured["video_id"] = vid
+            req_url = req.url
+            
+            # Catch Video
+            if captured["video_id"] == "N/A":
+                vid = extract_video_id_from_url(req_url)
+                if vid:
+                    captured["video_id"] = vid
+            
+            # Catch App Link directly from network
+            if captured["app_link"] == "N/A":
+                store_link = clean_store_link(req_url)
+                if store_link:
+                    captured["app_link"] = store_link
 
         page.on("request", handle_request)
-        page.on("response", handle_request)
+        page.on("response", handle_request) # Check responses too in case of redirects
 
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(3000)
 
-            # Scroll creative preview into view
             try:
                 page.locator("creative-preview").first.scroll_into_view_if_needed(timeout=3000)
                 page.wait_for_timeout(1000)
             except:
                 pass
 
-            # Video extraction
+            # Extract Video via UI interaction
             click_possible_video_targets(page)
-            video_id = wait_for_video_id(page, captured, max_seconds=15)
+            video_id = wait_for_video_id(page, captured, max_seconds=10)
             if video_id == "N/A":
                 video_id = scan_browser_performance_for_video(page)
 
@@ -294,8 +234,25 @@ def scrape_single_url(url_row):
                 if video_id == "N/A":
                     video_id = scan_browser_performance_for_video(page)
 
-            # ── Extract accurate app store link ────────────────────────────
-            app_link = extract_app_store_link(page, context)
+            # ── EXTACT APP LINK ───────────────────────────────────────────
+            app_link = captured["app_link"]
+            
+            # 2. If Network Sniffing failed, try Force-Clicking the UI
+            if app_link == "N/A":
+                clicked_url = click_install_button_and_capture(page, context)
+                if clicked_url:
+                    parsed = parse_app_link_from_href(clicked_url)
+                    if parsed:
+                        app_link = parsed
+                    else:
+                        clean_clicked = clean_store_link(clicked_url)
+                        if clean_clicked:
+                            app_link = clean_clicked
+                            
+            # 3. If Force-Clicking failed, deep scan the raw HTML
+            if app_link == "N/A":
+                app_link = scan_html_for_app_link(page)
+
             print(f"📦 Row {row_num} app_link: {app_link}")
             # ──────────────────────────────────────────────────────────────
 
