@@ -6,5 +6,6 @@ WORKSHEET_NAME = 'Ad Scraper'
 CREDENTIALS_FILE = 'creds.json'             
 
 # --- Scraper settings ---
-HEADLESS = True       # Keep False while testing so you can see the browser
-WAIT_TIMEOUT = 4       # Seconds to wait for the video to load after clicking play
+HEADLESS = True       
+
+WAIT_TIMEOUT = 20     # Seconds to wait for the video to load after clicking play

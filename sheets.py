@@ -24,11 +24,6 @@ def get_urls():
     return []
 
 def update_row(row_index, data):
-    """
-    Writes data back to Columns A through E.
-    data format: [advertiser, name, ad_url, app_link, video_id]
-    """
     sheet = get_sheet()
-    # Update range is now A to E
-    cell_range = f'A{row_index}:E{row_index}'
-    sheet.update(values=[data], range_name=cell_range)
+    cell_range = f"A{row_index}:E{row_index}"
+    sheet.update(cell_range, [data])
