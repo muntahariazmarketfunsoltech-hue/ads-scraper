@@ -1,5 +1,5 @@
 from playwright.sync_api import sync_playwright
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor
 import re
 import sheets
@@ -84,28 +84,20 @@ def click_possible_video_targets(page):
     return False
 
 
-# ── NEW: extract install/download link from the ad iframe ──────────────────
-def extract_app_link(page):
-    """
-    The Install / Download button lives inside the adframe iframe.
-    Its anchor has class containing 'install-button-anchor' and carries
-    the real destination URL in the href attribute.
-    We try every frame on the page so it works regardless of iframe nesting.
-    """
-    # Strategy 1: search every frame for the install-button-anchor
+def get_raw_install_href(page):
+    """Get the raw href from the install/download button anchor inside the ad iframe."""
     for frame in page.frames:
         try:
             href = frame.eval_on_selector(
                 "a.install-button-anchor, a[id*='install-button'], a[class*='install-button']",
                 "el => el.getAttribute('href')"
             )
-            if href and href.strip() and href.strip() != "N/A":
+            if href and href.strip():
                 return href.strip()
         except Exception:
             continue
 
-    # Strategy 2: look for any anchor whose href points to googleleadservices
-    #             or a known app-store URL (play.google.com / apps.apple.com)
+    # Fallback: any anchor pointing to googleleadservices or store
     for frame in page.frames:
         try:
             hrefs = frame.eval_on_selector_all(
@@ -116,19 +108,149 @@ def extract_app_link(page):
                 if not href:
                     continue
                 low = href.lower()
-                if (
-                    "googleleadservices.com" in low
-                    or "play.google.com/store" in low
-                    or "apps.apple.com" in low
-                    or "app.adjust.com" in low
-                    or "onelink" in low
-                ):
+                if "googleleadservices.com" in low or "play.google.com/store" in low or "apps.apple.com" in low:
                     return href.strip()
         except Exception:
             continue
+    return None
+
+
+def click_install_button_and_capture(page, context):
+    """
+    Actually click the Install/Download button inside the ad iframe and
+    intercept the new tab / navigation it triggers — that URL IS the final
+    app store link, no parsing needed.
+    """
+    app_url = {"value": None}
+
+    # Listen for any new page (new tab) opened by the click
+    def on_page(new_page):
+        try:
+            new_page.wait_for_load_state("commit", timeout=15000)
+            url = new_page.url
+            if url and url != "about:blank":
+                app_url["value"] = url
+            new_page.close()
+        except Exception:
+            try:
+                url = new_page.url
+                if url and url != "about:blank":
+                    app_url["value"] = url
+                new_page.close()
+            except Exception:
+                pass
+
+    context.on("page", on_page)
+
+    clicked = False
+    for frame in page.frames:
+        try:
+            anchor = frame.locator(
+                "a.install-button-anchor, a[id*='install-button'], a[class*='install-button']"
+            ).first
+            if anchor.count() == 0:
+                continue
+            anchor.scroll_into_view_if_needed(timeout=3000)
+            # Open in same tab so we capture the navigation
+            frame.evaluate(
+                "el => { el.removeAttribute('target'); }",
+                anchor.element_handle()
+            )
+            anchor.click(timeout=5000)
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    if not clicked:
+        # Try generic install/download button text
+        for frame in page.frames:
+            try:
+                btn = frame.locator("text=Install, text=Download").first
+                if btn.count() == 0:
+                    continue
+                btn.scroll_into_view_if_needed(timeout=2000)
+                btn.click(timeout=5000)
+                clicked = True
+                break
+            except Exception:
+                continue
+
+    if clicked:
+        # Wait for new tab to appear and be captured
+        page.wait_for_timeout(4000)
+
+    context.remove_listener("page", on_page)
+    return app_url["value"]
+
+
+def parse_app_link_from_href(raw_href):
+    """
+    Properly parse the googleleadservices URL to extract the destination
+    app store URL. The actual destination is in the 'adurl' query parameter
+    (URL-encoded). We decode it layer by layer until we find a Play Store
+    or App Store URL.
+    """
+    if not raw_href:
+        return None
+
+    # Decode up to 3 layers
+    text = raw_href
+    for _ in range(3):
+        text = unquote(text)
+
+    # Now look for play.google.com or apps.apple.com in the decoded string
+    # Match the full URL up to a whitespace, quote, or unrelated param
+    play_match = re.search(
+        r'https://play\.google\.com/store/apps/details\?id=([a-zA-Z][a-zA-Z0-9_.]+)',
+        text
+    )
+    if play_match:
+        pkg = play_match.group(1).rstrip("&%+")
+        # Trim any junk after the package name (package names are only word chars + dots)
+        pkg = re.match(r'[a-zA-Z][a-zA-Z0-9_.]+', pkg).group(0).rstrip(".")
+        return f"https://play.google.com/store/apps/details?id={pkg}"
+
+    apple_match = re.search(
+        r'https://apps\.apple\.com/[a-zA-Z0-9/\-?=&_.%]+',
+        text
+    )
+    if apple_match:
+        url = apple_match.group(0)
+        # Cut at first unrelated character
+        url = re.split(r'["\'\s<>]', url)[0]
+        return url
+
+    return None
+
+
+def extract_app_store_link(page, context):
+    """
+    Main entry point. Uses two strategies and returns the best result:
+    1. Click the install button and intercept where it actually navigates (most accurate).
+    2. Parse the href directly (fast fallback).
+    """
+    # Strategy 1: click and intercept navigation — most accurate
+    clicked_url = click_install_button_and_capture(page, context)
+    if clicked_url:
+        low = clicked_url.lower()
+        if "play.google.com/store" in low or "apps.apple.com" in low:
+            # Clean up — keep only the id= param for Play Store
+            if "play.google.com" in low:
+                pkg_match = re.search(r'[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)', clicked_url)
+                if pkg_match:
+                    pkg = pkg_match.group(1).rstrip("&%+.")
+                    return f"https://play.google.com/store/apps/details?id={pkg}"
+            return clicked_url
+
+    # Strategy 2: parse the href directly
+    raw_href = get_raw_install_href(page)
+    print(f"    raw href (parse fallback): {(raw_href or '')[:120]}")
+    parsed = parse_app_link_from_href(raw_href)
+    if parsed:
+        return parsed
 
     return "N/A"
-# ──────────────────────────────────────────────────────────────────────────
 
 
 def scrape_single_url(url_row):
@@ -158,13 +280,12 @@ def scrape_single_url(url_row):
             except:
                 pass
 
-            # Automatic clicks with retries
+            # Video extraction
             click_possible_video_targets(page)
             video_id = wait_for_video_id(page, captured, max_seconds=15)
             if video_id == "N/A":
                 video_id = scan_browser_performance_for_video(page)
 
-            # Second click attempt
             if video_id == "N/A":
                 page.mouse.wheel(0, 300)
                 page.wait_for_timeout(1000)
@@ -173,23 +294,17 @@ def scrape_single_url(url_row):
                 if video_id == "N/A":
                     video_id = scan_browser_performance_for_video(page)
 
-            # ── Extract install link ──────────────────────────────────────
-            app_link = extract_app_link(page)
-            print(f"🔗 Row {row_num} app_link: {app_link}")
-            # ─────────────────────────────────────────────────────────────
+            # ── Extract accurate app store link ────────────────────────────
+            app_link = extract_app_store_link(page, context)
+            print(f"📦 Row {row_num} app_link: {app_link}")
+            # ──────────────────────────────────────────────────────────────
 
             advertiser = "N/A"
             ad_name    = "N/A"
 
-            if video_id != "N/A":
-                data = [advertiser, ad_name, url, app_link, video_id]
-                sheets.update_row(row_num, data)
-                print(f"✅ Row {row_num} saved | video_id: {video_id} | app_link: {app_link}")
-            else:
-                # Still save the row even if no video — so app_link isn't lost
-                data = [advertiser, ad_name, url, app_link, "N/A"]
-                sheets.update_row(row_num, data)
-                print(f"⏭ Row {row_num} — no video found | app_link: {app_link}")
+            data = [advertiser, ad_name, url, app_link, video_id]
+            sheets.update_row(row_num, data)
+            print(f"✅ Row {row_num} saved | video_id: {video_id} | app_link: {app_link}")
 
         except Exception as e:
             print(f"❌ Error row {row_num}: {e}")
