@@ -1,6 +1,7 @@
 # debug_scraper_auto_click.py
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
+from collections import Counter
 from datetime import datetime
 import re
 import sheets
@@ -63,8 +64,7 @@ def scan_browser_performance_for_video(page):
 
 def click_possible_video_targets(page):
     """
-    Automatic clicks for video ads.
-    Tries iframes, creative-preview, video elements, and play buttons.
+    Automatic clicks for video ads to trigger media playback.
     """
     selectors = [
         "iframe",
@@ -97,7 +97,6 @@ def click_possible_video_targets(page):
         except Exception:
             continue
 
-    # Fallback click center of viewport
     viewport = page.viewport_size or {"width": 1366, "height": 768}
     x = viewport["width"]/2
     y = viewport["height"]/2
@@ -106,7 +105,86 @@ def click_possible_video_targets(page):
     page.wait_for_timeout(1500)
     return False
 
-def run_debug_scraper(single_url):
+# ---------------- APP LINK EXTRACTION LOGIC ----------------
+
+def clean_store_link(url):
+    if not url:
+        return None
+    low = url.lower()
+    if "play.google.com" in low and "/apps/details" in low:
+        pkg_match = re.search(r'[?&]id=([a-zA-Z0-9_]+\.[a-zA-Z0-9_.]+)', url)
+        if pkg_match:
+            return f"https://play.google.com/store/apps/details?id={pkg_match.group(1)}"
+    elif "apps.apple.com" in low:
+        return re.split(r'["\'\s<>]', url)[0]
+    return None
+
+def parse_app_link_from_href(raw_href):
+    if not raw_href:
+        return None
+    text = raw_href
+    for _ in range(3):
+        text = unquote(text)
+    return clean_store_link(text)
+
+def extract_app_link_from_dom(page):
+    """
+    Hunts down the exact Install <a> tag based on the provided HTML structure
+    and extracts the raw href without needing to click it.
+    """
+    raw_href = None
+    
+    for frame in page.frames:
+        try:
+            # Target the exact classes discovered via the inspector
+            elements = frame.locator("a.install-button-anchor, a:has(.install-button), a:has(#install-button)")
+            for i in range(elements.count()):
+                el = elements.nth(i)
+                href = el.get_attribute("href")
+                if href and ("googleadservices.com" in href or "play.google.com" in href or "apps.apple.com" in href):
+                    raw_href = href
+                    print(f"▶ Found raw tracking href: {raw_href[:80]}...")
+                    break
+            if raw_href:
+                break
+        except Exception:
+            continue
+
+    if not raw_href:
+        try:
+            content = page.content()
+            match = re.search(r'href="(https://www\.googleadservices\.com/pagead/aclk[^"]+)"', content)
+            if match:
+                raw_href = match.group(1)
+                print(f"▶ Found raw tracking href via regex: {raw_href[:80]}...")
+        except Exception:
+            pass
+
+    if raw_href:
+        return parse_app_link_from_href(raw_href)
+        
+    return "N/A"
+
+def scan_html_for_app_link(page):
+    try:
+        content = page.content()
+        play_matches = re.findall(r'https://play\.google\.com/store/apps/details\?id=([a-zA-Z0-9_]+\.[a-zA-Z0-9_.]+)', content)
+        if play_matches:
+            filtered = [p for p in play_matches if p.lower() != 'com.google.android.gms']
+            if filtered:
+                most_common_pkg = Counter(filtered).most_common(1)[0][0]
+                return f"https://play.google.com/store/apps/details?id={most_common_pkg}"
+        
+        apple_matches = re.findall(r'https://apps\.apple\.com/[a-zA-Z0-9/\-?=&_.%]+', content)
+        if apple_matches:
+            return re.split(r'["\'\s<>]', apple_matches[0])[0]
+    except Exception:
+        pass
+    return "N/A"
+
+# ------------------------------------------------------------
+
+def run_debug_scraper(single_url, test_row=None):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=150)
         context = browser.new_context(
@@ -115,15 +193,19 @@ def run_debug_scraper(single_url):
         )
 
         page = context.new_page()
-        captured = {"video_id":"N/A"}
+        captured = {"video_id":"N/A", "app_link": "N/A"}
 
-        # Listen to network requests/responses to catch video
         def handle_request(request):
-            print("▶ Request URL:", request.url)
             vid = extract_video_id_from_url(request.url)
             if vid and captured["video_id"]=="N/A":
                 captured["video_id"] = vid
-                print("🎥 Detected video ID:", vid)
+                print("🎥 Detected video ID from network:", vid)
+                
+            if captured["app_link"] == "N/A":
+                store_link = clean_store_link(request.url)
+                if store_link:
+                    captured["app_link"] = store_link
+                    print(f"📦 Detected App Link from network: {store_link}")
 
         page.on("request", handle_request)
         page.on("response", handle_request)
@@ -133,22 +215,19 @@ def run_debug_scraper(single_url):
             page.goto(single_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
-            # Scroll creative-preview into view
             try:
                 page.locator("creative-preview").first.scroll_into_view_if_needed(timeout=3000)
                 page.wait_for_timeout(1000)
             except Exception:
                 pass
 
-            # First automatic click
+            # ---- FETCH VIDEO ID ----
             click_possible_video_targets(page)
             video_id = wait_for_video_id(page, lambda: captured["video_id"], max_seconds=30)
 
-            # Performance scan if video not detected
             if video_id == "N/A":
                 video_id = scan_browser_performance_for_video(page)
 
-            # Second automatic click attempt
             if video_id == "N/A":
                 print("⏳ No video yet, trying second click...")
                 try:
@@ -159,16 +238,35 @@ def run_debug_scraper(single_url):
                 click_possible_video_targets(page)
                 video_id = wait_for_video_id(page, lambda: captured["video_id"], max_seconds=30)
 
-            # Final scan before giving up
             if video_id == "N/A":
-                print("⏳ Final scan before giving up...")
                 page.wait_for_timeout(5000)
                 if captured["video_id"] != "N/A":
                     video_id = captured["video_id"]
                 else:
                     video_id = scan_browser_performance_for_video(page)
 
-            print(f"✅ Video ID captured: {video_id if video_id != 'N/A' else 'NONE'}")
+            print(f"✅ Video ID finalized: {video_id if video_id != 'N/A' else 'NONE'}")
+
+            # ---- FETCH APP LINK ----
+            app_link = captured["app_link"]
+            
+            if app_link == "N/A":
+                print("⏳ Extracting link directly from DOM based on HTML structure...")
+                app_link = extract_app_link_from_dom(page)
+                            
+            if app_link == "N/A":
+                print("⏳ Scanning raw HTML for naked App Links...")
+                app_link = scan_html_for_app_link(page)
+
+            print(f"✅ App Link finalized: {app_link}")
+
+            # ---- UPDATE GOOGLE SHEET ----
+            if test_row:
+                advertiser = "N/A"
+                ad_name    = "N/A"
+                data = [advertiser, ad_name, single_url, app_link, video_id]
+                sheets.update_row(test_row, data)
+                print(f"📝 Wrote to sheet at row {test_row}")
 
         except Exception as e:
             print("❌ Error during debug:", e)
@@ -178,5 +276,5 @@ def run_debug_scraper(single_url):
             print("🔹 Finished debugging single URL")
 
 if __name__=="__main__":
-    test_url = "https://adstransparency.google.com/advertiser/AR04661836496116908033/creative/CR08392446506761715713?region=anywhere"
-    run_debug_scraper(test_url)
+    test_url = "https://adstransparency.google.com/advertiser/AR04661836496116908033/creative/CR00379126873570934785?region=PK"
+    run_debug_scraper(test_url, test_row=None)
