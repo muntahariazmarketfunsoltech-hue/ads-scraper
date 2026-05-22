@@ -1,11 +1,13 @@
-# scraper_single_browser_parallel.py
-from playwright.sync_api import sync_playwright
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse, parse_qs
+import asyncio
 import re
+from playwright.async_api import async_playwright
+from urllib.parse import urlparse, parse_qs
 import sheets
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
+MAX_CONCURRENT = 3
+SHEET_BATCH_SIZE = 9
+
 
 def extract_video_id_from_url(req_url):
     try:
@@ -19,116 +21,286 @@ def extract_video_id_from_url(req_url):
                 return req_url.split("/")[-1].split("?")[0]
         if ".m3u8" in url_lower:
             return req_url.split("/")[-1].split("?")[0]
-    except:
+    except Exception:
         return None
     return None
 
-def wait_for_video_id(page, captured, max_seconds=20):
+
+def extract_youtube_ad_video_id(content):
+    patterns = [
+        r'"adVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+        r'"adPlacementConfig".*?"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+        r'"linearAd".*?"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+        r'adVideoId["\s:]+([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            return match.group(1)
+    return None
+
+
+async def wait_for_video_id(page, get_video_id, max_seconds=15):
+    """Poll but bail out early as soon as ID is found."""
     waited = 0
     while waited < max_seconds:
-        if captured.get("video_id") and captured["video_id"] != "N/A":
-            return captured["video_id"]
-        page.wait_for_timeout(500)
-        waited += 0.5
+        vid = get_video_id()
+        if vid and vid != "N/A":
+            return vid
+        await page.wait_for_timeout(300)  # check every 300ms not 500ms
+        waited += 0.3
     return "N/A"
 
-def click_possible_video_targets(page):
-    selectors = ["iframe", "creative-preview", "video",
-                 'button[aria-label*="Play"]', 'button[title*="Play"]']
-    for sel in selectors:
-        try:
-            elements = page.locator(sel)
-            for i in range(elements.count()):
-                el = elements.nth(i)
-                if el.is_visible():
-                    try:
-                        el.scroll_into_view_if_needed(timeout=2000)
-                        box = el.bounding_box()
-                        if box and box["y"] >= 0:
-                            x = box["x"] + box["width"]/2
-                            y = box["y"] + box["height"]/2
-                            page.mouse.click(x, y)
-                            page.wait_for_timeout(1000)
-                            return True
-                    except:
-                        continue
-        except:
-            continue
-    return False
 
-def scan_browser_performance_for_video(page):
+async def scan_browser_performance_for_video(page):
     try:
-        urls = page.evaluate("() => performance.getEntriesByType('resource').map(r => r.name)")
+        urls = await page.evaluate(
+            "() => performance.getEntriesByType('resource').map(r => r.name)"
+        )
         for u in urls:
             vid = extract_video_id_from_url(u)
             if vid:
                 return vid
-    except:
+    except Exception:
         pass
     return "N/A"
 
-def scrape_single_url(browser, row_num, url):
-    context = browser.new_context(viewport={"width":1366,"height":768})
-    page = context.new_page()
-    captured = {"video_id":"N/A"}
 
-    def handle_request(req):
-        vid = extract_video_id_from_url(req.url)
-        if vid and captured["video_id"]=="N/A":
-            captured["video_id"] = vid
+async def click_possible_video_targets(page):
+    selectors = [
+        "video", "creative-preview", "iframe",
+        'button[aria-label*="Play"]',
+        'button[title*="Play"]',
+        'img[src*="play"]',
+    ]
+    for sel in selectors:
+        try:
+            elements = page.locator(sel)
+            count = await elements.count()
+            for i in range(count):
+                el = elements.nth(i)
+                if await el.is_visible():
+                    try:
+                        await el.scroll_into_view_if_needed(timeout=1000)
+                        box = await el.bounding_box()
+                        if box and box["y"] >= 0:
+                            x = box["x"] + box["width"] / 2
+                            y = box["y"] + box["height"] / 2
+                            await page.mouse.click(x, y)
+                            await page.wait_for_timeout(800)  # was 1500ms
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    viewport = page.viewport_size or {"width": 1366, "height": 768}
+    await page.mouse.click(viewport["width"] / 2, viewport["height"] / 2)
+    await page.wait_for_timeout(800)
+    return False
 
-    page.on("request", handle_request)
-    page.on("response", handle_request)
 
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3000)
+async def scrape_youtube_url(page, captured):
+    """Register response listener and extract YouTube ad ID."""
 
-        # Skip non-video ads
-        if page.locator("video, creative-preview").count() == 0:
-            print(f"⏭ Row {row_num} skipped, non-video ad")
+    async def handle_response(response):
+        if captured["video_id"] != "N/A":
             return
+        try:
+            url = response.url
+            if "youtubei/v1" in url or "get_video_info" in url:
+                body = await response.text()
+                ad_id = extract_youtube_ad_video_id(body)
+                if ad_id:
+                    captured["video_id"] = ad_id
+                    return
+            vid = extract_video_id_from_url(url)
+            if vid:
+                captured["video_id"] = vid
+        except Exception:
+            pass
 
-        click_possible_video_targets(page)
-        video_id = wait_for_video_id(page, captured, max_seconds=20)
+    page.on("response", handle_response)
 
-        # Retry click if video ID not found
-        if video_id == "N/A":
-            page.mouse.wheel(0, 400)
-            page.wait_for_timeout(1000)
-            click_possible_video_targets(page)
-            video_id = wait_for_video_id(page, captured, max_seconds=15)
+    # Click player to trigger ad
+    try:
+        player = page.locator("#movie_player, .html5-video-player")
+        if await player.count() > 0:
+            await player.first.click()
+    except Exception:
+        pass
 
-        # Fallback to performance entries
-        if video_id == "N/A":
-            video_id = scan_browser_performance_for_video(page)
+    # Wait up to 10s for response listener to fire
+    video_id = await wait_for_video_id(page, lambda: captured["video_id"], max_seconds=10)
+    if video_id != "N/A":
+        return video_id
 
-        # Only write video ID
-        sheets.update_row(row_num, ["N/A","N/A",url,"N/A",video_id])
-        print(f"✅ Row {row_num} saved: Video ID = {video_id}")
+    # Fallback: scan page source
+    try:
+        content = await page.content()
+        ad_id = extract_youtube_ad_video_id(content)
+        if ad_id:
+            return ad_id
+    except Exception:
+        pass
 
-    except Exception as e:
-        print(f"❌ Error processing row {row_num}: {e}")
-    finally:
-        page.close()
-        context.close()
+    # Fallback: read JS variable directly
+    try:
+        result = await page.evaluate("""
+            () => {
+                try {
+                    const p = window.ytInitialPlayerResponse;
+                    if (!p) return null;
+                    const str = JSON.stringify(p);
+                    const m = str.match(/"adVideoId":"([a-zA-Z0-9_-]{11})"/);
+                    return m ? m[1] : null;
+                } catch(e) { return null; }
+            }
+        """)
+        if result:
+            return result
+    except Exception:
+        pass
 
-def run_scraper_parallel(max_workers=3):
+    return "N/A"
+
+
+async def scrape_single_url(sem, browser, row_num, url):
+    async with sem:
+        context = await browser.new_context(
+            viewport={"width": 1366, "height": 768},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        captured = {"video_id": "N/A", "all_urls": []}
+
+        def handle_request(req):
+            captured["all_urls"].append(req.url)
+            vid = extract_video_id_from_url(req.url)
+            if vid and captured["video_id"] == "N/A":
+                captured["video_id"] = vid
+
+        page.on("request", handle_request)
+
+        try:
+            print(f"  ▶ Row {row_num}: {url}")
+
+            # "commit" fires as soon as navigation starts — captures requests earlier
+            await page.goto(url, wait_until="commit", timeout=30000)
+
+            is_youtube = "youtube.com/watch" in url
+
+            if is_youtube:
+                # Small wait for initial XHR responses to fire
+                await page.wait_for_timeout(2000)
+                video_id = await scrape_youtube_url(page, captured)
+
+            else:
+                # Wait 2s then immediately check — don't always wait the full time
+                await page.wait_for_timeout(2000)
+                vid = captured["video_id"]
+                if vid and vid != "N/A":
+                    video_id = vid  # already captured from network, skip clicking
+                else:
+                    await click_possible_video_targets(page)
+                    video_id = await wait_for_video_id(
+                        page, lambda: captured["video_id"], max_seconds=15
+                    )
+
+                # One retry with scroll if still nothing
+                if video_id == "N/A":
+                    await page.mouse.wheel(0, 400)
+                    await page.wait_for_timeout(500)
+                    await click_possible_video_targets(page)
+                    video_id = await wait_for_video_id(
+                        page, lambda: captured["video_id"], max_seconds=10
+                    )
+
+                # Performance API fallback
+                if video_id == "N/A":
+                    video_id = await scan_browser_performance_for_video(page)
+
+            if video_id == "N/A":
+                has_video_traffic = any(
+                    extract_video_id_from_url(u) for u in captured["all_urls"]
+                )
+                if not has_video_traffic:
+                    print(f"  ⏭  Row {row_num} — no video traffic detected")
+                    return row_num, None
+
+            print(f"  ✅ Row {row_num} — Video ID: {video_id}")
+            return row_num, ["N/A", "N/A", url, "N/A", video_id]
+
+        except Exception as e:
+            print(f"  ❌ Row {row_num} error: {e}")
+            return row_num, ["N/A", "N/A", url, "N/A", "N/A"]
+        finally:
+            await page.close()
+            await context.close()
+
+
+async def write_batch_to_sheets(batch):
+    for row_num, data in batch:
+        if data is None:
+            continue
+        for attempt in range(1, 4):
+            try:
+                await asyncio.to_thread(sheets.update_row, row_num, data)
+                print(f"  📝 Sheets: row {row_num} written")
+                break
+            except Exception as e:
+                print(f"  ⚠️  Sheets row {row_num} attempt {attempt}/3: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(3 * attempt)
+                else:
+                    print(f"  ❌ Sheets gave up on row {row_num}")
+
+
+async def run_scraper_async():
     urls = sheets.get_urls()
-    url_rows = [(i+2, u.strip()) for i,u in enumerate(urls) if u.strip()]
+    url_rows = [(i + 2, u.strip()) for i, u in enumerate(urls) if u.strip()]
+
     if not url_rows:
         print("No URLs to process.")
         return
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # set False to debug slow ads
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(scrape_single_url, browser, row_num, url) for row_num, url in url_rows]
-            for f in futures:
-                f.result()
-        browser.close()
+    print(f"📋 Found {len(url_rows)} URLs — {MAX_CONCURRENT} browsers running in parallel\n")
 
-    print("✅ Finished processing all URLs")
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+    results_lock = asyncio.Lock()
+    pending_results = []
 
-if __name__=="__main__":
-    run_scraper_parallel(max_workers=3)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+
+        async def task_wrapper(row_num, url):
+            result = await scrape_single_url(sem, browser, row_num, url)
+            async with results_lock:
+                pending_results.append(result)
+                if len(pending_results) >= SHEET_BATCH_SIZE:
+                    batch = pending_results[:SHEET_BATCH_SIZE]
+                    del pending_results[:SHEET_BATCH_SIZE]
+                    print(f"\n📤 Writing batch of {len(batch)} rows to Sheets...")
+                    await write_batch_to_sheets(batch)
+                    print("  ✅ Batch written\n")
+
+        await asyncio.gather(*[
+            task_wrapper(row_num, url)
+            for row_num, url in url_rows
+        ])
+
+        if pending_results:
+            print(f"\n📤 Writing final {len(pending_results)} rows to Sheets...")
+            await write_batch_to_sheets(pending_results)
+            print("  ✅ Final batch written")
+
+        await browser.close()
+
+    print("\n✅ All done.")
+
+
+if __name__ == "__main__":
+    asyncio.run(run_scraper_async())
