@@ -1,17 +1,11 @@
-# scraper_final_googleadservices.py
+# scraper_parallel_video_id_fixed.py
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 import re
 import sheets
-import config
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
-
-def clean_text(value):
-    if not value:
-        return "N/A"
-    return re.sub(r"\s+", " ", value).strip() or "N/A"
 
 def extract_video_id_from_url(req_url):
     try:
@@ -25,21 +19,16 @@ def extract_video_id_from_url(req_url):
                 return req_url.split("/")[-1].split("?")[0]
         if ".m3u8" in url_lower:
             return req_url.split("/")[-1].split("?")[0]
-        if "youtube.com/embed/" in url_lower:
-            return req_url.split("youtube.com/embed/")[1].split("?")[0].split("&")[0]
-        if "youtube.com/watch" in url_lower:
-            return query.get("v", [None])[0]
-        if "youtu.be/" in url_lower:
-            return req_url.split("youtu.be/")[1].split("?")[0].split("&")[0]
     except Exception:
         return None
     return None
 
-def wait_for_video_id(page, captured, max_seconds=25):
+def wait_for_video_id(page, get_video_id, max_seconds=60):
     waited = 0
     while waited < max_seconds:
-        if captured["video_id"] != "N/A":
-            return captured["video_id"]
+        vid = get_video_id()
+        if vid and vid != "N/A":
+            return vid
         page.wait_for_timeout(500)
         waited += 0.5
     return "N/A"
@@ -51,7 +40,7 @@ def scan_browser_performance_for_video(page):
             vid = extract_video_id_from_url(u)
             if vid:
                 return vid
-    except:
+    except Exception:
         pass
     return "N/A"
 
@@ -69,7 +58,7 @@ def click_possible_video_targets(page):
                     try:
                         el.scroll_into_view_if_needed(timeout=2000)
                         box = el.bounding_box()
-                        if box and box["y"] >= 0 and box["width"]>=180 and box["height"]>=120:
+                        if box and box["y"] >= 0:
                             x = box["x"] + box["width"]/2
                             y = box["y"] + box["height"]/2
                             page.mouse.click(x, y)
@@ -84,77 +73,12 @@ def click_possible_video_targets(page):
     page.wait_for_timeout(1500)
     return False
 
-def extract_advertiser_and_title(page):
-    advertiser_selectors = [
-        '[data-testid*="advertiser"]',
-        '[aria-label*="Advertiser"]',
-        'div[role="heading"]:has-text("Advertiser")',
-        'a[href*="/advertiser/"]',
-        'span:has-text("Advertiser")',
-        'div[class*="advertiser"]',
-        'div[class*="publisher"]'
-    ]
-    title_selectors = [
-        '[data-testid*="title"]',
-        '[aria-label*="Ad"]',
-        'div[role="heading"]:not([aria-label*="Advertiser"])',
-        'h1', 'h2', 'span[role="heading"]',
-        'div[class*="title"]'
-    ]
-
-    def safe_first_text(selectors, frame=None):
-        for sel in selectors:
-            try:
-                loc = (frame or page).locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    txt = loc.inner_text(timeout=2000)
-                    txt = re.sub(r"\s+", " ", txt).strip()
-                    if txt:
-                        return txt
-            except:
-                continue
-        return "N/A"
-
-    advertiser = safe_first_text(advertiser_selectors)
-    title = safe_first_text(title_selectors)
-
-    for f in page.frames:
-        adv_in_frame = safe_first_text(advertiser_selectors, frame=f)
-        if adv_in_frame != "N/A":
-            advertiser = adv_in_frame
-        title_in_frame = safe_first_text(title_selectors, frame=f)
-        if title_in_frame != "N/A":
-            title = title_in_frame
-
-    return advertiser, title
-
-def extract_app_link(page):
-    try:
-        # Check main page anchors first
-        anchors = page.locator("a").all()
-        for a in anchors:
-            href = a.get_attribute("href")
-            if href and "googleadservices.com/pagead/aclk" in href:
-                return href.strip()
-
-        # Check all iframes
-        for f in page.frames:
-            anchors = f.locator("a").all()
-            for a in anchors:
-                href = a.get_attribute("href")
-                if href and "googleadservices.com/pagead/aclk" in href:
-                    return href.strip()
-    except:
-        pass
-    return "N/A"
-
-def scrape_single_url(url_row):
-    row_num, url = url_row
+def scrape_single_url(row_num, url):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width":1366,"height":768})
         page = context.new_page()
-        captured = {"video_id":"N/A"}
+        captured = {"video_id": "N/A"}
 
         def handle_request(req):
             vid = extract_video_id_from_url(req.url)
@@ -165,59 +89,55 @@ def scrape_single_url(url_row):
         page.on("response", handle_request)
 
         try:
+            print(f"\n--- Processing Row {row_num}: {url} ---")
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
 
-            try:
-                page.locator("div[role='main']").first.scroll_into_view_if_needed(timeout=3000)
-                page.wait_for_timeout(1500)
-            except:
-                pass
+            # Skip non-video ads
+            if page.locator("video, creative-preview").count() == 0:
+                print(f"⏭ Row {row_num} skipped, non-video ad")
+                return
 
+            # First click attempt
             click_possible_video_targets(page)
-            video_id = wait_for_video_id(page, captured, max_seconds=15)
+            video_id = wait_for_video_id(page, lambda: captured["video_id"], max_seconds=60)
+
+            # Second click retry for slow-loading video ads
+            if video_id == "N/A":
+                page.mouse.wheel(0, 400)
+                page.wait_for_timeout(1000)
+                click_possible_video_targets(page)
+                video_id = wait_for_video_id(page, lambda: captured["video_id"], max_seconds=30)
+
+            # Fallback to performance entries
             if video_id == "N/A":
                 video_id = scan_browser_performance_for_video(page)
 
-            if video_id == "N/A":
-                page.mouse.wheel(0,300)
-                page.wait_for_timeout(1000)
-                click_possible_video_targets(page)
-                video_id = wait_for_video_id(page, captured, max_seconds=10)
-                if video_id == "N/A":
-                    video_id = scan_browser_performance_for_video(page)
-
-            advertiser, ad_name = extract_advertiser_and_title(page)
-            app_link = extract_app_link(page)  # raw googleadservices link
-
-            if video_id != "N/A":
-                data = [advertiser, ad_name, url, app_link, video_id]
-                sheets.update_row(row_num, data)
-                print(f"✅ Row {row_num} saved: {advertiser}, {ad_name}, {app_link}, {video_id}")
-            else:
-                print(f"⏭ Row {row_num} skipped, no video found")
+            # Only write Video ID
+            data = ["N/A","N/A",url,"N/A",video_id]
+            sheets.update_row(row_num, data)
+            print(f"✅ Row {row_num} saved: Video ID = {video_id}")
 
         except Exception as e:
-            print(f"❌ Error row {row_num}: {e}")
+            print(f"❌ Error processing row {row_num}: {e}")
         finally:
             page.close()
             context.close()
             browser.close()
 
-def run_parallel_scraper(max_workers=3):
+def run_scraper_parallel(max_workers=3):
     urls = sheets.get_urls()
-    urls = [(i+2, u.strip()) for i,u in enumerate(urls) if u.strip()]
-    if not urls:
+    url_rows = [(i+2, u.strip()) for i,u in enumerate(urls) if u.strip()]
+    if not url_rows:
         print("No URLs to process.")
         return
 
-    from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(scrape_single_url, url_row) for url_row in urls]
-        for future in futures:
-            future.result()
+        futures = [executor.submit(scrape_single_url, row_num, url) for row_num, url in url_rows]
+        for f in futures:
+            f.result()
 
-    print("✅ Finished processing all URLs")
+    print("\n✅ Finished processing all URLs")
 
 if __name__=="__main__":
-    run_parallel_scraper(max_workers=3)
+    run_scraper_parallel(max_workers=3)
