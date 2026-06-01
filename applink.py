@@ -1,6 +1,7 @@
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import sheets
 import time
 
@@ -13,6 +14,10 @@ INSTALL_SELECTORS = [
     'a:has-text("Get")',
     'a:has-text("Download")',
 ]
+
+
+def get_exact_time():
+    return datetime.now().strftime("%I:%M:%S %p")
 
 
 def clean_googleadservices_link(href):
@@ -114,7 +119,6 @@ def get_visible_install_candidates_from_target(target):
 
                     score = 0
 
-                    # Prefer actual install button class.
                     try:
                         class_name = el.get_attribute("class", timeout=1000) or ""
                         if "install-button-anchor" in class_name:
@@ -122,24 +126,20 @@ def get_visible_install_candidates_from_target(target):
                     except Exception:
                         pass
 
-                    # Prefer Install/Get/Download text.
                     if "install" in text:
                         score += 80
                     elif "get" in text or "download" in text:
                         score += 40
 
-                    # Prefer buttons near upper/middle ad area, not footer or carousel buttons.
                     center_x = box["x"] + box["width"] / 2
                     center_y = box["y"] + box["height"] / 2
 
-                    # Your creative is usually around x=450-760 and y=80-650.
                     if 350 <= center_x <= 850:
                         score += 40
 
                     if 50 <= center_y <= 700:
                         score += 40
 
-                    # Penalize page footer / see-more area.
                     if center_y > 700:
                         score -= 100
 
@@ -341,7 +341,6 @@ def scrape_single_app_link(url_row):
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(7000)
 
-            # Make sure page did not redirect to another creative.
             current_url = page.url
             if creative_id and creative_id not in current_url:
                 print(f"⚠ Row {row_num}: creative changed in browser, retrying original URL")
@@ -350,32 +349,63 @@ def scrape_single_app_link(url_row):
 
             app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
 
+            app_link_checked_time = get_exact_time()
+
             if app_link == "N/A":
-                print(f"⏭ Row {row_num}: no exact visible install link found")
+                print(f"⏭ Row {row_num}: no exact visible install link found at {app_link_checked_time}")
+                sheets.update_app_link(row_num, "N/A", app_link_checked_time)
                 return
 
-            sheets.update_app_link(row_num, app_link)
+            sheets.update_app_link(row_num, app_link, app_link_checked_time)
 
-            print(f"✅ Row {row_num}: saved app link")
+            print(f"✅ Row {row_num}: saved app link at {app_link_checked_time}")
 
         except Exception as e:
-            print(f"❌ Row {row_num} error: {e}")
+            app_link_checked_time = get_exact_time()
+            print(f"❌ Row {row_num} error at {app_link_checked_time}: {e}")
+
+            try:
+                sheets.update_app_link(row_num, "ERROR", app_link_checked_time)
+            except Exception:
+                pass
 
         finally:
             page.close()
             context.close()
             browser.close()
 
-
+sheets.add_log(
+    row_number=row_num,
+    status="SUCCESS",
+    log_type="APP_LINK",
+    url=url,
+    app_link=app_link,
+    message="App link saved"
+)
+sheets.add_log(
+    row_number=row_num,
+    status="NOT_FOUND",
+    log_type="APP_LINK",
+    url=url,
+    app_link="N/A",
+    message="No exact visible install link found"
+)
+sheets.add_log(
+    row_number=row_num,
+    status="ERROR",
+    log_type="APP_LINK",
+    url=url,
+    message=str(e)
+)
 def run_parallel_app_link_scraper(max_workers=1):
     """
-    Process only rows where column E has Video ID.
+    Process only rows where column F has valid Video ID.
     max_workers=1 is important to avoid repeated/wrong carousel links.
     """
     url_rows = sheets.get_video_ad_rows()
 
     if not url_rows:
-        print("No video-ad rows found. Make sure column E has Video IDs.")
+        print("No video-ad rows found. Make sure column F has Video IDs.")
         return
 
     print(f"🎬 Found {len(url_rows)} video-ad rows. Extracting exact app links...")

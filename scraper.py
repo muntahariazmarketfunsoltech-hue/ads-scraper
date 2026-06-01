@@ -1,11 +1,16 @@
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import re
 import sheets
 
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".m3u8")
+
+
+def get_exact_time():
+    return datetime.now().strftime("%I:%M:%S %p")
 
 
 def clean_text(value):
@@ -349,23 +354,43 @@ def scrape_single_url(url_row):
                 click_possible_video_targets(page)
                 video_id = wait_for_video_id(page, captured, max_seconds=10)
 
+            # NON-VIDEO ROW SAVE
             if video_id == "N/A":
-                print(f"⏭ Row {row_num} skipped: non-video ad")
+                video_checked_time = get_exact_time()
+
+                data = [
+                    "",
+                    "",
+                    url,
+                    "",
+                    "",
+                    "NON_VIDEO",
+                    video_checked_time
+                ]
+
+                sheets.update_video_row(row_num, data)
+
+                print(f"⏭ Row {row_num} marked NON_VIDEO at {video_checked_time}")
                 return
 
+            # VIDEO ROW SAVE
             advertiser, ad_name = extract_advertiser_and_title(page)
+
+            video_checked_time = get_exact_time()
 
             data = [
                 advertiser,
                 ad_name,
                 url,
                 "",
-                video_id
+                "",
+                video_id,
+                video_checked_time
             ]
 
             sheets.update_video_row(row_num, data)
 
-            print(f"✅ Row {row_num} saved video ID: {video_id}")
+            print(f"✅ Row {row_num} saved video ID at {video_checked_time}: {video_id}")
 
         except Exception as e:
             print(f"❌ Error row {row_num}: {e}")
@@ -374,7 +399,29 @@ def scrape_single_url(url_row):
             page.close()
             context.close()
             browser.close()
-
+sheets.add_log(
+    row_number=row_num,
+    status="SUCCESS",
+    log_type="VIDEO",
+    url=url,
+    video_id=video_id,
+    message="Video ID saved"
+)
+sheets.add_log(
+    row_number=row_num,
+    status="NON_VIDEO",
+    log_type="VIDEO",
+    url=url,
+    video_id="NON_VIDEO",
+    message="No video detected"
+)
+sheets.add_log(
+    row_number=row_num,
+    status="ERROR",
+    log_type="VIDEO",
+    url=url,
+    message=str(e)
+)
 
 def run_parallel_video_scraper(max_workers=3):
     urls = sheets.get_urls_with_retry()

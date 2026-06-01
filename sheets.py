@@ -24,7 +24,7 @@ def get_sheet():
 def get_urls():
     """Fetches all transparency URLs from Column H, skipping the header row."""
     sheet = get_sheet()
-    records = sheet.col_values(8)
+    records = sheet.col_values(8)  # H
 
     if len(records) > 1:
         return records[1:]
@@ -46,55 +46,148 @@ def get_urls_with_retry(max_retries=5, delay=5):
 
 def update_video_row(row_index, data):
     """
-    Writes video-ad data into columns A-E.
+    Writes video-ad data into columns A-G.
+
+    Sheet columns:
+    A = Advertiser
+    B = Name
+    C = Ad URL
+    D = App Link
+    E = App Link Time Span
+    F = Video ID
+    G = Video ID Time Span
 
     data format:
-    [advertiser, ad_name, ad_url, app_link, video_id]
-
-    App Link is blank here.
+    [advertiser, ad_name, ad_url, app_link, app_link_time_span, video_id, video_time_span]
     """
     sheet = get_sheet()
-    cell_range = f"A{row_index}:E{row_index}"
+    cell_range = f"A{row_index}:G{row_index}"
     sheet.update(cell_range, [data])
 
 
-def update_app_link(row_index, app_link):
+def update_app_link(row_index, app_link, app_link_time_span):
     """
-    Writes only App Link into column D.
+    Writes App Link into column D and App Link Time Span into column E.
     """
     sheet = get_sheet()
-    sheet.update_cell(row_index, 4, app_link)
+    cell_range = f"D{row_index}:E{row_index}"
+    sheet.update(cell_range, [[app_link, app_link_time_span]])
 
 
 def get_video_ad_rows():
     """
-    Reads transparency URLs from column H and Video IDs from column E.
-    Only returns rows where Video ID exists.
-
-    This prevents app links from being saved for non-video ads.
+    Reads transparency URLs from column H and Video IDs from column F.
+    Only returns rows where Video ID exists and is not NON_VIDEO/N/A.
     """
     sheet = get_sheet()
 
     transparency_urls = sheet.col_values(8)  # H
-    video_ids = sheet.col_values(5)          # E
+    video_ids = sheet.col_values(6)          # F
 
     rows = []
 
     max_len = max(len(transparency_urls), len(video_ids))
 
+    print(f"📌 Column H URL cells found: {len(transparency_urls)}")
+    print(f"📌 Column F Video ID cells found: {len(video_ids)}")
+
     for i in range(1, max_len):
         row_num = i + 1
 
         url = transparency_urls[i].strip() if i < len(transparency_urls) else ""
-        video_id = video_ids[i].strip() if i < len(video_ids) else ""
+        video_id_raw = video_ids[i] if i < len(video_ids) else ""
+        video_id = str(video_id_raw).strip()
+
+        print(f"🔎 Row {row_num}: F='{video_id}' | H exists={'YES' if url else 'NO'}")
 
         if not url:
+            print(f"⏭ Row {row_num} skipped: no transparency URL in column H")
             continue
 
-        if not video_id or video_id.upper() == "N/A":
-            print(f"⏭ Row {row_num} skipped: no video ID in column E")
+        invalid_values = ["", "N/A", "NA", "NONE", "NULL", "NON_VIDEO", "VIDEO ID", "VIDEO_ID"]
+
+        if video_id.upper() in invalid_values:
+            print(f"⏭ Row {row_num} skipped: invalid video ID in column F = '{video_id}'")
             continue
 
         rows.append((row_num, url))
+        print(f"✅ Row {row_num} accepted for app-link scraping")
 
+    print(f"🎬 Total accepted video-ad rows: {len(rows)}")
     return rows
+def get_or_create_logs_sheet():
+    """
+    Gets Logs worksheet. If it does not exist, creates it.
+
+    Logs columns:
+    A = Time
+    B = Row
+    C = Status
+    D = Type
+    E = URL
+    F = Video ID
+    G = App Link
+    H = Message
+    """
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        config.CREDENTIALS_FILE,
+        scope
+    )
+
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(config.SPREADSHEET_ID)
+
+    try:
+        logs_sheet = spreadsheet.worksheet("Logs")
+    except gspread.exceptions.WorksheetNotFound:
+        logs_sheet = spreadsheet.add_worksheet(
+            title="Logs",
+            rows=1000,
+            cols=8
+        )
+
+        logs_sheet.update(
+            "A1:H1",
+            [[
+                "Time",
+                "Row",
+                "Status",
+                "Type",
+                "URL",
+                "Video ID",
+                "App Link",
+                "Message"
+            ]]
+        )
+
+    return logs_sheet
+
+
+def add_log(row_number, status, log_type, url="", video_id="", app_link="", message=""):
+    """
+    Adds one row into Logs worksheet.
+
+    Columns:
+    Time | Row | Status | Type | URL | Video ID | App Link | Message
+    """
+    from datetime import datetime
+
+    logs_sheet = get_or_create_logs_sheet()
+
+    log_time = datetime.now().strftime("%I:%M:%S %p")
+
+    logs_sheet.append_row([
+        log_time,
+        row_number,
+        status,
+        log_type,
+        url,
+        video_id,
+        app_link,
+        message
+    ])
