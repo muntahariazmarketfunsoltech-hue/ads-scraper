@@ -43,7 +43,7 @@ def safe_add_log(
 ):
     """
     Thread-safe log writing.
-    Prevents parallel threads from writing logs at the exact same time.
+    Prevents parallel threads from writing logs at the same time.
     """
     with SHEET_LOCK:
         sheets.add_log(
@@ -64,7 +64,8 @@ def get_exact_time():
 def clean_text(value):
     if not value:
         return "N/A"
-    return re.sub(r"\s+", " ", value).strip() or "N/A"
+
+    return re.sub(r"\s+", " ", str(value)).strip() or "N/A"
 
 
 # =========================
@@ -99,6 +100,10 @@ def is_real_video_response(response):
 
 
 def extract_video_id_from_url(req_url):
+    """
+    Extracts only clean video IDs or filenames.
+    Does NOT return full video links.
+    """
     try:
         url_lower = req_url.lower()
         parsed = urlparse(req_url)
@@ -141,6 +146,9 @@ def extract_video_id_from_url(req_url):
 
 
 def extract_video_from_dom(page):
+    """
+    Checks actual video elements on page and inside frames.
+    """
     try:
         video_sources = page.evaluate("""
             () => Array.from(document.querySelectorAll('video'))
@@ -176,6 +184,9 @@ def extract_video_from_dom(page):
 
 
 def scan_browser_performance_for_video(page):
+    """
+    Scans performance entries for real video URLs only.
+    """
     try:
         urls = page.evaluate("""
             () => performance.getEntriesByType('resource').map(r => r.name)
@@ -207,6 +218,10 @@ def scan_browser_performance_for_video(page):
 
 
 def click_possible_video_targets(page):
+    """
+    Clicks possible video preview areas.
+    Avoids install buttons/app links.
+    """
     selectors = [
         "video",
         "iframe",
@@ -272,6 +287,9 @@ def wait_for_video_id(page, captured, max_seconds=20):
 
 
 def detect_video_id(page, captured):
+    """
+    Main video detection flow.
+    """
     video_id = extract_video_from_dom(page)
 
     if video_id == "N/A":
@@ -419,6 +437,10 @@ def get_visible_install_candidates_from_target(target):
 
 
 def extract_visible_install_link(page):
+    """
+    Extracts only the visible install button from the active creative.
+    Does not scan random adservice links.
+    """
     all_candidates = []
 
     try:
@@ -446,6 +468,11 @@ def extract_visible_install_link(page):
 
 
 def extract_install_link_by_precise_js(page):
+    """
+    Strict JS fallback:
+    only install-button-anchor / Install text links,
+    not every googleadservices link.
+    """
     js = """
     () => {
         const anchors = Array.from(document.querySelectorAll('a[href], a[data-href]'));
@@ -550,59 +577,127 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
-# ADVERTISER / TITLE
+# ADVERTISER LOGIC
 # =========================
 
-def extract_advertiser_and_title(page):
-    advertiser_selectors = [
-        '[data-testid*="advertiser"]',
-        '[aria-label*="Advertiser"]',
-        'a[href*="/advertiser/"]',
-        'div[class*="advertiser"]',
-        'div[class*="publisher"]'
+def extract_advertiser_from_page(page):
+    """
+    Extract advertiser name from the top Ad details header area.
+    Example:
+    9D TECHNOLOGIES (SMC-PRIVATE) LIMITED
+    """
+
+    selectors = [
+        "h1",
+        "div[role='heading']",
+        "span[role='heading']",
     ]
 
-    title_selectors = [
-        '[data-testid*="title"]',
-        'div[role="heading"]:not([aria-label*="Advertiser"])',
-        'h1',
-        'h2',
-        'span[role="heading"]',
-        'div[class*="title"]'
-    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            count = loc.count()
 
-    def safe_first_text(selectors, frame=None):
-        target = frame or page
+            for i in range(count):
+                try:
+                    text = loc.nth(i).inner_text(timeout=2000)
+                    text = clean_text(text)
 
-        for sel in selectors:
-            try:
-                loc = target.locator(sel).first
+                    if text == "N/A":
+                        continue
 
-                if loc.count() > 0 and loc.is_visible():
-                    txt = loc.inner_text(timeout=2000)
-                    txt = clean_text(txt)
+                    lower = text.lower()
 
-                    if txt != "N/A":
-                        return txt
+                    if lower == "ad details":
+                        continue
 
-            except Exception:
-                continue
+                    if "last shown" in lower:
+                        continue
 
-        return "N/A"
+                    if "format:" in lower:
+                        continue
 
-    advertiser = safe_first_text(advertiser_selectors)
-    title = safe_first_text(title_selectors)
+                    if "shown in" in lower:
+                        continue
 
-    for frame in page.frames:
-        adv_in_frame = safe_first_text(advertiser_selectors, frame=frame)
-        if adv_in_frame != "N/A":
-            advertiser = adv_in_frame
+                    if "report this ad" in lower:
+                        continue
 
-        title_in_frame = safe_first_text(title_selectors, frame=frame)
-        if title_in_frame != "N/A":
-            title = title_in_frame
+                    if "see more ads" in lower:
+                        continue
 
-    return advertiser, title
+                    if "the information about this ad may vary" in lower:
+                        continue
+
+                    if len(text) >= 3:
+                        return text
+
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    try:
+        advertiser = page.evaluate("""
+            () => {
+                const bad = [
+                    'ad details',
+                    'last shown',
+                    'format:',
+                    'shown in',
+                    'report this ad',
+                    'see more ads',
+                    'the information about this ad may vary'
+                ];
+
+                const nodes = Array.from(document.querySelectorAll('body *'))
+                    .map(el => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        const text = (el.innerText || el.textContent || '').trim();
+
+                        return {
+                            text,
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.width,
+                            h: rect.height,
+                            font: parseFloat(style.fontSize || '0'),
+                            weight: style.fontWeight || ''
+                        };
+                    })
+                    .filter(item => {
+                        if (!item.text) return false;
+                        if (item.text.length < 3) return false;
+                        if (item.y < 0 || item.y > 250) return false;
+                        if (item.w < 80 || item.h < 10) return false;
+
+                        const t = item.text.toLowerCase();
+
+                        if (bad.some(b => t.includes(b))) return false;
+
+                        return true;
+                    });
+
+                nodes.sort((a, b) => {
+                    if (b.font !== a.font) return b.font - a.font;
+                    return a.y - b.y;
+                });
+
+                return nodes.length ? nodes[0].text : null;
+            }
+        """)
+
+        advertiser = clean_text(advertiser)
+
+        if advertiser != "N/A":
+            return advertiser
+
+    except Exception:
+        pass
+
+    return "N/A"
 
 
 # =========================
@@ -668,13 +763,16 @@ def scrape_single_url(url_row):
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
-            # Step 1: detect video ID first
+            # Step 1: extract advertiser from top header
+            advertiser = extract_advertiser_from_page(page)
+
+            # Step 2: detect video ID first
             video_id = detect_video_id(page, captured)
             video_time = get_exact_time()
 
             if video_id == "N/A":
                 data = [
-                    "",
+                    advertiser,
                     "",
                     url,
                     "",
@@ -699,9 +797,7 @@ def scrape_single_url(url_row):
 
             print(f"🎬 Row {row_num}: video ID found first: {video_id}")
 
-            # Step 2: only after video is found, extract app link
-            advertiser, ad_name = extract_advertiser_and_title(page)
-
+            # Step 3: only after video is found, extract app link
             app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
             app_link_time = get_exact_time()
 
@@ -714,7 +810,7 @@ def scrape_single_url(url_row):
 
             data = [
                 advertiser,
-                ad_name,
+                "",
                 url,
                 app_link,
                 app_link_time,
@@ -734,7 +830,7 @@ def scrape_single_url(url_row):
                 message=message
             )
 
-            print(f"✅ Row {row_num}: saved video ID + app link")
+            print(f"✅ Row {row_num}: saved advertiser + video ID + app link")
 
         except Exception as e:
             error_time = get_exact_time()
