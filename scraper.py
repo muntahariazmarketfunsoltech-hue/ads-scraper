@@ -1,49 +1,64 @@
 from playwright.sync_api import sync_playwright
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import re
 import time
+import threading
 import sheets
 
 
+MAX_WORKERS = 2
+SHEET_LOCK = threading.Lock()
+
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".m3u8")
 
-
-def get_exact_time():
-    return datetime.now().strftime("%I:%M:%S %p")
-
-
-def format_duration(start_time):
-    seconds = round(time.time() - start_time, 2)
-
-    if seconds < 60:
-        return f"{seconds}s"
-
-    minutes = int(seconds // 60)
-    remaining_seconds = round(seconds % 60, 2)
-
-    return f"{minutes}m {remaining_seconds}s"
+INSTALL_SELECTORS = [
+    "a.install-button-anchor.svg-anchor",
+    "a.install-button-anchor",
+    'a[data-asoch-targets-ad-objective-type]',
+    'a:has-text("Install")',
+    'a:has-text("Get")',
+    'a:has-text("Download")',
+]
 
 
-def safe_step_log(row_num, status, log_type, url="", video_id="", app_link="", start_time=None, message=""):
+def safe_update_combined_row(row_num, data):
     """
-    Writes step log safely so logging errors do not stop scraper.
+    Thread-safe Google Sheet row update.
+    Browser scraping runs parallel, but sheet writing is protected.
     """
-    try:
-        time_taken = format_duration(start_time) if start_time else ""
-        sheets.add_step_log(
-            row_number=row_num,
+    with SHEET_LOCK:
+        sheets.update_combined_row(row_num, data)
+
+
+def safe_add_log(
+    row_number,
+    status,
+    log_type,
+    url="",
+    video_id="",
+    app_link="",
+    message=""
+):
+    """
+    Thread-safe log writing.
+    Prevents parallel threads from writing logs at the exact same time.
+    """
+    with SHEET_LOCK:
+        sheets.add_log(
+            row_number=row_number,
             status=status,
             log_type=log_type,
             url=url,
             video_id=video_id,
             app_link=app_link,
-            time_taken=time_taken,
             message=message
         )
-    except Exception:
-        pass
+
+
+def get_exact_time():
+    return datetime.now().strftime("%I:%M:%S %p")
 
 
 def clean_text(value):
@@ -52,10 +67,11 @@ def clean_text(value):
     return re.sub(r"\s+", " ", value).strip() or "N/A"
 
 
+# =========================
+# VIDEO ID LOGIC
+# =========================
+
 def is_real_video_response(response):
-    """
-    Checks if the browser response is actually video/media.
-    """
     try:
         url = response.url.lower()
         headers = response.headers
@@ -83,10 +99,6 @@ def is_real_video_response(response):
 
 
 def extract_video_id_from_url(req_url):
-    """
-    Extracts only clean video IDs or filenames.
-    Does NOT return full links.
-    """
     try:
         url_lower = req_url.lower()
         parsed = urlparse(req_url)
@@ -129,9 +141,6 @@ def extract_video_id_from_url(req_url):
 
 
 def extract_video_from_dom(page):
-    """
-    Checks actual video elements on page and inside frames.
-    """
     try:
         video_sources = page.evaluate("""
             () => Array.from(document.querySelectorAll('video'))
@@ -167,9 +176,6 @@ def extract_video_from_dom(page):
 
 
 def scan_browser_performance_for_video(page):
-    """
-    Scans performance entries for real video URLs only.
-    """
     try:
         urls = page.evaluate("""
             () => performance.getEntriesByType('resource').map(r => r.name)
@@ -201,10 +207,6 @@ def scan_browser_performance_for_video(page):
 
 
 def click_possible_video_targets(page):
-    """
-    Clicks possible video preview areas.
-    Avoids install buttons/app links.
-    """
     selectors = [
         "video",
         "iframe",
@@ -269,6 +271,288 @@ def wait_for_video_id(page, captured, max_seconds=20):
     return "N/A"
 
 
+def detect_video_id(page, captured):
+    video_id = extract_video_from_dom(page)
+
+    if video_id == "N/A":
+        click_possible_video_targets(page)
+        video_id = wait_for_video_id(page, captured, max_seconds=15)
+
+    if video_id == "N/A":
+        video_id = scan_browser_performance_for_video(page)
+
+    if video_id == "N/A":
+        page.mouse.wheel(0, 400)
+        page.wait_for_timeout(1500)
+
+        click_possible_video_targets(page)
+        video_id = wait_for_video_id(page, captured, max_seconds=10)
+
+    return video_id
+
+
+# =========================
+# APP LINK LOGIC
+# =========================
+
+def clean_googleadservices_link(href):
+    if not href:
+        return "N/A"
+
+    href = href.strip()
+
+    if href.startswith("//"):
+        href = "https:" + href
+
+    try:
+        parsed = urlparse(href)
+        query = parse_qs(parsed.query)
+
+        possible_keys = [
+            "adurl",
+            "url",
+            "q",
+            "u",
+            "ds_dest_url",
+            "destination",
+        ]
+
+        for key in possible_keys:
+            value = query.get(key, [None])[0]
+            if value:
+                return unquote(value)
+
+    except Exception:
+        pass
+
+    return href
+
+
+def is_good_app_link(href):
+    if not href:
+        return False
+
+    href = href.lower()
+
+    return (
+        "googleadservices.com/pagead/aclk" in href
+        or "play.google.com" in href
+        or "apps.apple.com" in href
+        or "itunes.apple.com" in href
+    )
+
+
+def get_visible_install_candidates_from_target(target):
+    candidates = []
+
+    for selector in INSTALL_SELECTORS:
+        try:
+            loc = target.locator(selector)
+            count = loc.count()
+
+            for i in range(count):
+                try:
+                    el = loc.nth(i)
+
+                    href = el.get_attribute("href", timeout=1500)
+                    data_href = el.get_attribute("data-href", timeout=1000)
+
+                    final_href = href or data_href
+
+                    if not final_href or not is_good_app_link(final_href):
+                        continue
+
+                    box = el.bounding_box(timeout=1500)
+
+                    if not box:
+                        continue
+
+                    if box["width"] < 20 or box["height"] < 10:
+                        continue
+
+                    text = ""
+                    try:
+                        text = el.inner_text(timeout=1000).strip().lower()
+                    except Exception:
+                        pass
+
+                    score = 0
+
+                    try:
+                        class_name = el.get_attribute("class", timeout=1000) or ""
+                        if "install-button-anchor" in class_name:
+                            score += 100
+                    except Exception:
+                        pass
+
+                    if "install" in text:
+                        score += 80
+                    elif "get" in text or "download" in text:
+                        score += 40
+
+                    center_x = box["x"] + box["width"] / 2
+                    center_y = box["y"] + box["height"] / 2
+
+                    if 350 <= center_x <= 850:
+                        score += 40
+
+                    if 50 <= center_y <= 700:
+                        score += 40
+
+                    if center_y > 700:
+                        score -= 100
+
+                    candidates.append({
+                        "href": final_href,
+                        "score": score,
+                        "box": box,
+                        "text": text,
+                    })
+
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    return candidates
+
+
+def extract_visible_install_link(page):
+    all_candidates = []
+
+    try:
+        all_candidates.extend(get_visible_install_candidates_from_target(page))
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            all_candidates.extend(get_visible_install_candidates_from_target(frame))
+        except Exception:
+            continue
+
+    if not all_candidates:
+        return "N/A"
+
+    all_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    best = all_candidates[0]
+
+    if best["score"] <= 0:
+        return "N/A"
+
+    return clean_googleadservices_link(best["href"])
+
+
+def extract_install_link_by_precise_js(page):
+    js = """
+    () => {
+        const anchors = Array.from(document.querySelectorAll('a[href], a[data-href]'));
+
+        const candidates = anchors.map(a => {
+            const href = a.href || a.getAttribute('href') || a.getAttribute('data-href') || '';
+            const text = (a.innerText || a.textContent || '').trim().toLowerCase();
+            const cls = String(a.className || '').toLowerCase();
+            const aria = String(a.getAttribute('aria-label') || '').toLowerCase();
+            const rect = a.getBoundingClientRect();
+
+            const goodLink =
+                href.includes('googleadservices.com/pagead/aclk') ||
+                href.includes('play.google.com') ||
+                href.includes('apps.apple.com') ||
+                href.includes('itunes.apple.com');
+
+            const looksInstall =
+                cls.includes('install-button-anchor') ||
+                text.includes('install') ||
+                text.includes('get') ||
+                text.includes('download') ||
+                aria.includes('install');
+
+            const visible =
+                rect.width > 20 &&
+                rect.height > 10 &&
+                rect.bottom > 0 &&
+                rect.right > 0 &&
+                rect.top < window.innerHeight &&
+                rect.left < window.innerWidth;
+
+            if (!goodLink || !looksInstall || !visible) {
+                return null;
+            }
+
+            let score = 0;
+
+            if (cls.includes('install-button-anchor')) score += 100;
+            if (text.includes('install')) score += 80;
+            if (text.includes('get') || text.includes('download')) score += 40;
+
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+
+            if (cx >= 350 && cx <= 850) score += 40;
+            if (cy >= 50 && cy <= 700) score += 40;
+            if (cy > 700) score -= 100;
+
+            return {
+                href,
+                score
+            };
+        }).filter(Boolean);
+
+        candidates.sort((a, b) => b.score - a.score);
+
+        return candidates.length ? candidates[0].href : null;
+    }
+    """
+
+    try:
+        href = page.evaluate(js)
+        if href and is_good_app_link(href):
+            return clean_googleadservices_link(href)
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            href = frame.evaluate(js)
+            if href and is_good_app_link(href):
+                return clean_googleadservices_link(href)
+        except Exception:
+            continue
+
+    return "N/A"
+
+
+def wait_and_extract_install_link(page, max_wait_seconds=35):
+    start = time.time()
+
+    while time.time() - start < max_wait_seconds:
+        app_link = extract_visible_install_link(page)
+
+        if app_link != "N/A":
+            return app_link
+
+        app_link = extract_install_link_by_precise_js(page)
+
+        if app_link != "N/A":
+            return app_link
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(1500)
+
+    return "N/A"
+
+
+# =========================
+# ADVERTISER / TITLE
+# =========================
+
 def extract_advertiser_and_title(page):
     advertiser_selectors = [
         '[data-testid*="advertiser"]',
@@ -321,9 +605,12 @@ def extract_advertiser_and_title(page):
     return advertiser, title
 
 
+# =========================
+# MAIN SCRAPER
+# =========================
+
 def scrape_single_url(url_row):
     row_num, url = url_row
-    row_start_time = time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -332,6 +619,7 @@ def scrape_single_url(url_row):
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-web-security",
             ]
         )
 
@@ -367,159 +655,24 @@ def scrape_single_url(url_row):
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
-            print(f"🔍 Checking row {row_num}: {url}")
+            print(f"🔍 Row {row_num}: opening transparency URL")
 
-            safe_step_log(
-                row_num=row_num,
+            safe_add_log(
+                row_number=row_num,
                 status="STARTED",
-                log_type="VIDEO",
+                log_type="COMBINED",
                 url=url,
-                start_time=row_start_time,
-                message="Scraper started checking this transparency link."
-            )
-
-            safe_step_log(
-                row_num=row_num,
-                status="OPENING_PAGE",
-                log_type="PAGE",
-                url=url,
-                start_time=row_start_time,
-                message="Opening the transparency page in browser."
+                message="Started video ID then app link extraction"
             )
 
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-            safe_step_log(
-                row_num=row_num,
-                status="DOM_LOADED",
-                log_type="PAGE",
-                url=url,
-                start_time=row_start_time,
-                message="Page DOM loaded successfully."
-            )
-
             page.wait_for_timeout(4000)
 
-            safe_step_log(
-                row_num=row_num,
-                status="WAITED_FOR_PREVIEW",
-                log_type="PAGE",
-                url=url,
-                start_time=row_start_time,
-                message="Waited 4 seconds for Google ad preview and iframe content to load."
-            )
-
-            safe_step_log(
-                row_num=row_num,
-                status="CHECKING_DOM_VIDEO",
-                log_type="VIDEO",
-                url=url,
-                start_time=row_start_time,
-                message="Checking page and iframe DOM for video elements."
-            )
-
-            video_id = extract_video_from_dom(page)
-
-            if video_id != "N/A":
-                safe_step_log(
-                    row_num=row_num,
-                    status="DOM_VIDEO_FOUND",
-                    log_type="VIDEO",
-                    url=url,
-                    video_id=video_id,
-                    start_time=row_start_time,
-                    message="Video ID was found from DOM video element."
-                )
+            # Step 1: detect video ID first
+            video_id = detect_video_id(page, captured)
+            video_time = get_exact_time()
 
             if video_id == "N/A":
-                safe_step_log(
-                    row_num=row_num,
-                    status="CLICKING_VIDEO_AREA",
-                    log_type="VIDEO",
-                    url=url,
-                    start_time=row_start_time,
-                    message="No video found in DOM, now clicking possible video preview area."
-                )
-
-                click_possible_video_targets(page)
-
-                safe_step_log(
-                    row_num=row_num,
-                    status="WAITING_AFTER_CLICK",
-                    log_type="VIDEO",
-                    url=url,
-                    start_time=row_start_time,
-                    message="Waiting after click to catch video network request or DOM video."
-                )
-
-                video_id = wait_for_video_id(page, captured, max_seconds=15)
-
-                if video_id != "N/A":
-                    safe_step_log(
-                        row_num=row_num,
-                        status="VIDEO_FOUND_AFTER_CLICK",
-                        log_type="VIDEO",
-                        url=url,
-                        video_id=video_id,
-                        start_time=row_start_time,
-                        message="Video ID was found after clicking the preview area."
-                    )
-
-            if video_id == "N/A":
-                safe_step_log(
-                    row_num=row_num,
-                    status="CHECKING_PERFORMANCE",
-                    log_type="VIDEO",
-                    url=url,
-                    start_time=row_start_time,
-                    message="Still no video found, now checking browser performance resource URLs."
-                )
-
-                video_id = scan_browser_performance_for_video(page)
-
-                if video_id != "N/A":
-                    safe_step_log(
-                        row_num=row_num,
-                        status="VIDEO_FOUND_IN_PERFORMANCE",
-                        log_type="VIDEO",
-                        url=url,
-                        video_id=video_id,
-                        start_time=row_start_time,
-                        message="Video ID was found from browser performance resources."
-                    )
-
-            if video_id == "N/A":
-                safe_step_log(
-                    row_num=row_num,
-                    status="SECOND_ATTEMPT",
-                    log_type="VIDEO",
-                    url=url,
-                    start_time=row_start_time,
-                    message="Still no video found, scrolling and trying one more click attempt."
-                )
-
-                page.mouse.wheel(0, 400)
-                page.wait_for_timeout(1500)
-
-                click_possible_video_targets(page)
-
-                video_id = wait_for_video_id(page, captured, max_seconds=10)
-
-                if video_id != "N/A":
-                    safe_step_log(
-                        row_num=row_num,
-                        status="VIDEO_FOUND_SECOND_ATTEMPT",
-                        log_type="VIDEO",
-                        url=url,
-                        video_id=video_id,
-                        start_time=row_start_time,
-                        message="Video ID was found on the second attempt."
-                    )
-
-            # NON-VIDEO ROW SAVE
-            if video_id == "N/A":
-                video_checked_time = get_exact_time()
-
                 data = [
                     "",
                     "",
@@ -527,103 +680,92 @@ def scrape_single_url(url_row):
                     "",
                     "",
                     "NON_VIDEO",
-                    video_checked_time
+                    video_time
                 ]
 
-                sheets.update_video_row(row_num, data)
+                safe_update_combined_row(row_num, data)
 
-                safe_step_log(
-                    row_num=row_num,
+                safe_add_log(
+                    row_number=row_num,
                     status="NON_VIDEO",
-                    log_type="VIDEO",
+                    log_type="COMBINED",
                     url=url,
                     video_id="NON_VIDEO",
-                    start_time=row_start_time,
-                    message="No video was detected after all checks. Row marked as NON_VIDEO."
+                    message="No video detected. App link not checked."
                 )
 
-                safe_step_log(
-                    row_num=row_num,
-                    status="FINISHED",
-                    log_type="VIDEO",
-                    url=url,
-                    video_id="NON_VIDEO",
-                    start_time=row_start_time,
-                    message="Finished this row. Final result: non-video ad."
-                )
-
-                print(f"⏭ Row {row_num} marked NON_VIDEO at {video_checked_time}")
+                print(f"⏭ Row {row_num}: NON_VIDEO at {video_time}")
                 return
 
-            safe_step_log(
-                row_num=row_num,
-                status="CHECKING_DETAILS",
-                log_type="DETAILS",
-                url=url,
-                video_id=video_id,
-                start_time=row_start_time,
-                message="Video found. Now extracting advertiser and ad name."
-            )
+            print(f"🎬 Row {row_num}: video ID found first: {video_id}")
 
+            # Step 2: only after video is found, extract app link
             advertiser, ad_name = extract_advertiser_and_title(page)
 
-            safe_step_log(
-                row_num=row_num,
-                status="DETAILS_EXTRACTED",
-                log_type="DETAILS",
-                url=url,
-                video_id=video_id,
-                start_time=row_start_time,
-                message=f"Advertiser/name extracted. Advertiser: {advertiser}, Name: {ad_name}"
-            )
+            app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
+            app_link_time = get_exact_time()
 
-            video_checked_time = get_exact_time()
+            if app_link == "N/A":
+                status = "VIDEO_FOUND_APP_LINK_NOT_FOUND"
+                message = "Video ID found, but exact visible install link not found"
+            else:
+                status = "SUCCESS"
+                message = "Video ID and app link saved"
 
             data = [
                 advertiser,
                 ad_name,
                 url,
-                "",
-                "",
+                app_link,
+                app_link_time,
                 video_id,
-                video_checked_time
+                video_time
             ]
 
-            sheets.update_video_row(row_num, data)
+            safe_update_combined_row(row_num, data)
 
-            safe_step_log(
-                row_num=row_num,
-                status="SUCCESS",
-                log_type="VIDEO",
+            safe_add_log(
+                row_number=row_num,
+                status=status,
+                log_type="COMBINED",
                 url=url,
                 video_id=video_id,
-                start_time=row_start_time,
-                message="Video ID saved successfully in the main sheet."
+                app_link=app_link,
+                message=message
             )
 
-            safe_step_log(
-                row_num=row_num,
-                status="FINISHED",
-                log_type="VIDEO",
-                url=url,
-                video_id=video_id,
-                start_time=row_start_time,
-                message="Finished this row. Final result: video ad."
-            )
-
-            print(f"✅ Row {row_num} saved video ID at {video_checked_time}: {video_id}")
+            print(f"✅ Row {row_num}: saved video ID + app link")
 
         except Exception as e:
-            print(f"❌ Error row {row_num}: {e}")
+            error_time = get_exact_time()
 
-            safe_step_log(
-                row_num=row_num,
-                status="ERROR",
-                log_type="VIDEO",
-                url=url,
-                start_time=row_start_time,
-                message=f"Scraper failed with error: {e}"
-            )
+            print(f"❌ Row {row_num} error at {error_time}: {e}")
+
+            try:
+                data = [
+                    "",
+                    "",
+                    url,
+                    "ERROR",
+                    error_time,
+                    "ERROR",
+                    error_time
+                ]
+
+                safe_update_combined_row(row_num, data)
+            except Exception:
+                pass
+
+            try:
+                safe_add_log(
+                    row_number=row_num,
+                    status="ERROR",
+                    log_type="COMBINED",
+                    url=url,
+                    message=str(e)
+                )
+            except Exception:
+                pass
 
         finally:
             page.close()
@@ -631,7 +773,7 @@ def scrape_single_url(url_row):
             browser.close()
 
 
-def run_parallel_video_scraper(max_workers=3):
+def run_parallel_combined_scraper(max_workers=2):
     urls = sheets.get_urls_with_retry()
 
     url_rows = [
@@ -644,17 +786,35 @@ def run_parallel_video_scraper(max_workers=3):
         print("No transparency URLs found in column H.")
         return
 
+    print(f"🚀 Starting combined scraper for {len(url_rows)} rows")
+    print(f"⚡ Running parallel with max_workers={max_workers}")
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(scrape_single_url, url_row)
+        futures = {
+            executor.submit(scrape_single_url, url_row): url_row
             for url_row in url_rows
-        ]
+        }
 
         for future in as_completed(futures):
-            future.result()
+            row_num, _ = futures[future]
 
-    print("✅ Finished processing video ads")
+            try:
+                future.result()
+            except Exception as e:
+                print(f"❌ Worker failed for row {row_num}: {e}")
+
+                try:
+                    safe_add_log(
+                        row_number=row_num,
+                        status="WORKER_ERROR",
+                        log_type="COMBINED",
+                        message=str(e)
+                    )
+                except Exception:
+                    pass
+
+    print("✅ Finished combined video ID + app link scraping")
 
 
 if __name__ == "__main__":
-    run_parallel_video_scraper(max_workers=3)
+    run_parallel_combined_scraper(max_workers=MAX_WORKERS)
