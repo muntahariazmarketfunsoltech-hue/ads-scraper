@@ -191,3 +191,95 @@ def add_log(row_number, status, log_type, url="", video_id="", app_link="", mess
         app_link,
         message
     ])
+def get_or_create_step_logs_sheet():
+    """
+    Gets StepLogs worksheet. If it does not exist, creates it.
+
+    Columns:
+    A = Time
+    B = Row
+    C = Status
+    D = Type
+    E = URL
+    F = Video ID
+    G = App Link
+    H = Time Taken
+    I = Message
+    """
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        config.CREDENTIALS_FILE,
+        scope
+    )
+
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(config.SPREADSHEET_ID)
+
+    try:
+        logs_sheet = spreadsheet.worksheet("StepLogs")
+    except gspread.exceptions.WorksheetNotFound:
+        logs_sheet = spreadsheet.add_worksheet(
+            title="StepLogs",
+            rows=5000,
+            cols=9
+        )
+
+        logs_sheet.update(
+            "A1:I1",
+            [[
+                "Time",
+                "Row",
+                "Status",
+                "Type",
+                "URL",
+                "Video ID",
+                "App Link",
+                "Time Taken",
+                "Message"
+            ]]
+        )
+
+    return logs_sheet
+
+
+def add_step_log(row_number, status, log_type, url="", video_id="", app_link="", time_taken="", message=""):
+    """
+    Adds one step-by-step log row into StepLogs.
+
+    Columns:
+    Time | Row | Status | Type | URL | Video ID | App Link | Time Taken | Message
+    """
+    from datetime import datetime
+
+    logs_sheet = get_or_create_step_logs_sheet()
+
+    log_time = datetime.now().strftime("%I:%M:%S %p")
+
+    logs_sheet.append_row([
+        log_time,
+        row_number,
+        status,
+        log_type,
+        url,
+        video_id,
+        app_link,
+        time_taken,
+        message
+    ])
+def add_step_logs_bulk(log_rows):
+    """
+    Adds multiple StepLogs rows in one request.
+    This is much faster than append_row for every step.
+
+    Expected row format:
+    [Time, Row, Status, Type, URL, Video ID, App Link, Time Taken, Message]
+    """
+    if not log_rows:
+        return
+
+    logs_sheet = get_or_create_step_logs_sheet()
+    logs_sheet.append_rows(log_rows, value_input_option="USER_ENTERED")

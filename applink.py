@@ -338,6 +338,14 @@ def scrape_single_app_link(url_row):
 
             print(f"🔗 Row {row_num}: opening creative {creative_id}")
 
+            sheets.add_log(
+                row_number=row_num,
+                status="STARTED",
+                log_type="APP_LINK",
+                url=url,
+                message="Started checking app link"
+            )
+
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(7000)
 
@@ -353,19 +361,51 @@ def scrape_single_app_link(url_row):
 
             if app_link == "N/A":
                 print(f"⏭ Row {row_num}: no exact visible install link found at {app_link_checked_time}")
+
                 sheets.update_app_link(row_num, "N/A", app_link_checked_time)
+
+                sheets.add_log(
+                    row_number=row_num,
+                    status="NOT_FOUND",
+                    log_type="APP_LINK",
+                    url=url,
+                    app_link="N/A",
+                    message="No exact visible install link found"
+                )
+
                 return
 
             sheets.update_app_link(row_num, app_link, app_link_checked_time)
+
+            sheets.add_log(
+                row_number=row_num,
+                status="SUCCESS",
+                log_type="APP_LINK",
+                url=url,
+                app_link=app_link,
+                message="App link saved"
+            )
 
             print(f"✅ Row {row_num}: saved app link at {app_link_checked_time}")
 
         except Exception as e:
             app_link_checked_time = get_exact_time()
+
             print(f"❌ Row {row_num} error at {app_link_checked_time}: {e}")
 
             try:
                 sheets.update_app_link(row_num, "ERROR", app_link_checked_time)
+            except Exception:
+                pass
+
+            try:
+                sheets.add_log(
+                    row_number=row_num,
+                    status="ERROR",
+                    log_type="APP_LINK",
+                    url=url,
+                    message=str(e)
+                )
             except Exception:
                 pass
 
@@ -374,29 +414,7 @@ def scrape_single_app_link(url_row):
             context.close()
             browser.close()
 
-sheets.add_log(
-    row_number=row_num,
-    status="SUCCESS",
-    log_type="APP_LINK",
-    url=url,
-    app_link=app_link,
-    message="App link saved"
-)
-sheets.add_log(
-    row_number=row_num,
-    status="NOT_FOUND",
-    log_type="APP_LINK",
-    url=url,
-    app_link="N/A",
-    message="No exact visible install link found"
-)
-sheets.add_log(
-    row_number=row_num,
-    status="ERROR",
-    log_type="APP_LINK",
-    url=url,
-    message=str(e)
-)
+
 def run_parallel_app_link_scraper(max_workers=1):
     """
     Process only rows where column F has valid Video ID.

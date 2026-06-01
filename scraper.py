@@ -3,6 +3,7 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import re
+import time
 import sheets
 
 
@@ -11,6 +12,38 @@ VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".m3u8")
 
 def get_exact_time():
     return datetime.now().strftime("%I:%M:%S %p")
+
+
+def format_duration(start_time):
+    seconds = round(time.time() - start_time, 2)
+
+    if seconds < 60:
+        return f"{seconds}s"
+
+    minutes = int(seconds // 60)
+    remaining_seconds = round(seconds % 60, 2)
+
+    return f"{minutes}m {remaining_seconds}s"
+
+
+def safe_step_log(row_num, status, log_type, url="", video_id="", app_link="", start_time=None, message=""):
+    """
+    Writes step log safely so logging errors do not stop scraper.
+    """
+    try:
+        time_taken = format_duration(start_time) if start_time else ""
+        sheets.add_step_log(
+            row_number=row_num,
+            status=status,
+            log_type=log_type,
+            url=url,
+            video_id=video_id,
+            app_link=app_link,
+            time_taken=time_taken,
+            message=message
+        )
+    except Exception:
+        pass
 
 
 def clean_text(value):
@@ -290,6 +323,7 @@ def extract_advertiser_and_title(page):
 
 def scrape_single_url(url_row):
     row_num, url = url_row
+    row_start_time = time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -329,40 +363,158 @@ def scrape_single_url(url_row):
         page.on("response", handle_response)
 
         try:
-            original_url = url
-
             if "region=" not in url:
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
             print(f"🔍 Checking row {row_num}: {url}")
 
-            sheets.add_log(
-                row_number=row_num,
+            safe_step_log(
+                row_num=row_num,
                 status="STARTED",
                 log_type="VIDEO",
                 url=url,
-                message="Started checking video ad"
+                start_time=row_start_time,
+                message="Scraper started checking this transparency link."
+            )
+
+            safe_step_log(
+                row_num=row_num,
+                status="OPENING_PAGE",
+                log_type="PAGE",
+                url=url,
+                start_time=row_start_time,
+                message="Opening the transparency page in browser."
             )
 
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            safe_step_log(
+                row_num=row_num,
+                status="DOM_LOADED",
+                log_type="PAGE",
+                url=url,
+                start_time=row_start_time,
+                message="Page DOM loaded successfully."
+            )
+
             page.wait_for_timeout(4000)
+
+            safe_step_log(
+                row_num=row_num,
+                status="WAITED_FOR_PREVIEW",
+                log_type="PAGE",
+                url=url,
+                start_time=row_start_time,
+                message="Waited 4 seconds for Google ad preview and iframe content to load."
+            )
+
+            safe_step_log(
+                row_num=row_num,
+                status="CHECKING_DOM_VIDEO",
+                log_type="VIDEO",
+                url=url,
+                start_time=row_start_time,
+                message="Checking page and iframe DOM for video elements."
+            )
 
             video_id = extract_video_from_dom(page)
 
+            if video_id != "N/A":
+                safe_step_log(
+                    row_num=row_num,
+                    status="DOM_VIDEO_FOUND",
+                    log_type="VIDEO",
+                    url=url,
+                    video_id=video_id,
+                    start_time=row_start_time,
+                    message="Video ID was found from DOM video element."
+                )
+
             if video_id == "N/A":
+                safe_step_log(
+                    row_num=row_num,
+                    status="CLICKING_VIDEO_AREA",
+                    log_type="VIDEO",
+                    url=url,
+                    start_time=row_start_time,
+                    message="No video found in DOM, now clicking possible video preview area."
+                )
+
                 click_possible_video_targets(page)
+
+                safe_step_log(
+                    row_num=row_num,
+                    status="WAITING_AFTER_CLICK",
+                    log_type="VIDEO",
+                    url=url,
+                    start_time=row_start_time,
+                    message="Waiting after click to catch video network request or DOM video."
+                )
+
                 video_id = wait_for_video_id(page, captured, max_seconds=15)
 
-            if video_id == "N/A":
-                video_id = scan_browser_performance_for_video(page)
+                if video_id != "N/A":
+                    safe_step_log(
+                        row_num=row_num,
+                        status="VIDEO_FOUND_AFTER_CLICK",
+                        log_type="VIDEO",
+                        url=url,
+                        video_id=video_id,
+                        start_time=row_start_time,
+                        message="Video ID was found after clicking the preview area."
+                    )
 
             if video_id == "N/A":
+                safe_step_log(
+                    row_num=row_num,
+                    status="CHECKING_PERFORMANCE",
+                    log_type="VIDEO",
+                    url=url,
+                    start_time=row_start_time,
+                    message="Still no video found, now checking browser performance resource URLs."
+                )
+
+                video_id = scan_browser_performance_for_video(page)
+
+                if video_id != "N/A":
+                    safe_step_log(
+                        row_num=row_num,
+                        status="VIDEO_FOUND_IN_PERFORMANCE",
+                        log_type="VIDEO",
+                        url=url,
+                        video_id=video_id,
+                        start_time=row_start_time,
+                        message="Video ID was found from browser performance resources."
+                    )
+
+            if video_id == "N/A":
+                safe_step_log(
+                    row_num=row_num,
+                    status="SECOND_ATTEMPT",
+                    log_type="VIDEO",
+                    url=url,
+                    start_time=row_start_time,
+                    message="Still no video found, scrolling and trying one more click attempt."
+                )
+
                 page.mouse.wheel(0, 400)
                 page.wait_for_timeout(1500)
 
                 click_possible_video_targets(page)
+
                 video_id = wait_for_video_id(page, captured, max_seconds=10)
+
+                if video_id != "N/A":
+                    safe_step_log(
+                        row_num=row_num,
+                        status="VIDEO_FOUND_SECOND_ATTEMPT",
+                        log_type="VIDEO",
+                        url=url,
+                        video_id=video_id,
+                        start_time=row_start_time,
+                        message="Video ID was found on the second attempt."
+                    )
 
             # NON-VIDEO ROW SAVE
             if video_id == "N/A":
@@ -380,20 +532,50 @@ def scrape_single_url(url_row):
 
                 sheets.update_video_row(row_num, data)
 
-                sheets.add_log(
-                    row_number=row_num,
+                safe_step_log(
+                    row_num=row_num,
                     status="NON_VIDEO",
                     log_type="VIDEO",
                     url=url,
                     video_id="NON_VIDEO",
-                    message="No video detected"
+                    start_time=row_start_time,
+                    message="No video was detected after all checks. Row marked as NON_VIDEO."
+                )
+
+                safe_step_log(
+                    row_num=row_num,
+                    status="FINISHED",
+                    log_type="VIDEO",
+                    url=url,
+                    video_id="NON_VIDEO",
+                    start_time=row_start_time,
+                    message="Finished this row. Final result: non-video ad."
                 )
 
                 print(f"⏭ Row {row_num} marked NON_VIDEO at {video_checked_time}")
                 return
 
-            # VIDEO ROW SAVE
+            safe_step_log(
+                row_num=row_num,
+                status="CHECKING_DETAILS",
+                log_type="DETAILS",
+                url=url,
+                video_id=video_id,
+                start_time=row_start_time,
+                message="Video found. Now extracting advertiser and ad name."
+            )
+
             advertiser, ad_name = extract_advertiser_and_title(page)
+
+            safe_step_log(
+                row_num=row_num,
+                status="DETAILS_EXTRACTED",
+                log_type="DETAILS",
+                url=url,
+                video_id=video_id,
+                start_time=row_start_time,
+                message=f"Advertiser/name extracted. Advertiser: {advertiser}, Name: {ad_name}"
+            )
 
             video_checked_time = get_exact_time()
 
@@ -409,13 +591,24 @@ def scrape_single_url(url_row):
 
             sheets.update_video_row(row_num, data)
 
-            sheets.add_log(
-                row_number=row_num,
+            safe_step_log(
+                row_num=row_num,
                 status="SUCCESS",
                 log_type="VIDEO",
                 url=url,
                 video_id=video_id,
-                message="Video ID saved"
+                start_time=row_start_time,
+                message="Video ID saved successfully in the main sheet."
+            )
+
+            safe_step_log(
+                row_num=row_num,
+                status="FINISHED",
+                log_type="VIDEO",
+                url=url,
+                video_id=video_id,
+                start_time=row_start_time,
+                message="Finished this row. Final result: video ad."
             )
 
             print(f"✅ Row {row_num} saved video ID at {video_checked_time}: {video_id}")
@@ -423,16 +616,14 @@ def scrape_single_url(url_row):
         except Exception as e:
             print(f"❌ Error row {row_num}: {e}")
 
-            try:
-                sheets.add_log(
-                    row_number=row_num,
-                    status="ERROR",
-                    log_type="VIDEO",
-                    url=url,
-                    message=str(e)
-                )
-            except Exception:
-                pass
+            safe_step_log(
+                row_num=row_num,
+                status="ERROR",
+                log_type="VIDEO",
+                url=url,
+                start_time=row_start_time,
+                message=f"Scraper failed with error: {e}"
+            )
 
         finally:
             page.close()
