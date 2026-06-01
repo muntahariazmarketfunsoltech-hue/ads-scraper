@@ -3,6 +3,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import config
 import time
 from datetime import datetime
+import uuid
 
 
 def get_sheet():
@@ -230,3 +231,225 @@ def add_log(row_number, status, log_type, url="", video_id="", app_link="", mess
         print(f"⚠ Failed to write log due to APIError: {e}")
     except Exception as e:
         print(f"⚠ Failed to write log: {e}")
+        import uuid
+from datetime import datetime, timedelta
+
+
+CLAIM_AGENT_COL = 9      # I
+CLAIM_TIME_COL = 10      # J
+CLAIM_TOKEN_COL = 11     # K
+CLAIM_STATUS_COL = 12    # L
+
+CLAIM_TTL_MINUTES = 5    # local testing; later change to 370
+
+
+def ensure_agent_headers():
+    """
+    Adds internal agent columns:
+    I = Agent
+    J = Claim Time
+    K = Claim Token
+    L = Claim Status
+    """
+    sheet = get_sheet()
+
+    headers = sheet.row_values(1)
+
+    required = {
+        9: "Agent",
+        10: "Claim Time",
+        11: "Claim Token",
+        12: "Claim Status"
+    }
+
+    updates = []
+
+    for col, name in required.items():
+        current = headers[col - 1] if len(headers) >= col else ""
+
+        if current != name:
+            col_letter = chr(64 + col)
+            updates.append({
+                "range": f"{col_letter}1",
+                "values": [[name]]
+            })
+
+    if updates:
+        sheet.batch_update(updates)
+
+
+def is_claim_expired(claim_time_text):
+    """
+    Returns True if claim is old/stale.
+    """
+    if not claim_time_text:
+        return True
+
+    try:
+        claim_time = datetime.strptime(claim_time_text, "%Y-%m-%d %H:%M:%S")
+        return datetime.now() - claim_time > timedelta(minutes=CLAIM_TTL_MINUTES)
+    except Exception:
+        return True
+
+
+def is_processed_video_value(value):
+    """
+    Column F decides whether row is already processed.
+    Any real value means do not overwrite.
+    """
+    value = str(value or "").strip()
+
+    if not value:
+        return False
+
+    return True
+
+
+def get_agent_rows_snapshot():
+    """
+    Reads main sheet once and returns row info.
+
+    H = transparency_url
+    F = Video ID / NON_VIDEO / ERROR
+    I-L = internal claim columns
+    """
+    ensure_agent_headers()
+
+    sheet = get_sheet()
+    values = sheet.get_all_values()
+
+    rows = []
+
+    for idx in range(1, len(values)):
+        row_num = idx + 1
+        row = values[idx]
+
+        url = row[7].strip() if len(row) >= 8 else ""
+        video_id = row[5].strip() if len(row) >= 6 else ""
+
+        claim_agent = row[8].strip() if len(row) >= 9 else ""
+        claim_time = row[9].strip() if len(row) >= 10 else ""
+        claim_token = row[10].strip() if len(row) >= 11 else ""
+        claim_status = row[11].strip() if len(row) >= 12 else ""
+
+        if not url:
+            continue
+
+        rows.append({
+            "row_num": row_num,
+            "url": url,
+            "video_id": video_id,
+            "claim_agent": claim_agent,
+            "claim_time": claim_time,
+            "claim_token": claim_token,
+            "claim_status": claim_status,
+            "processed": is_processed_video_value(video_id),
+            "claim_expired": is_claim_expired(claim_time)
+        })
+
+    return rows
+
+
+def count_unprocessed_rows():
+    """
+    Counts rows with URL in column H and blank column F.
+    """
+    rows = get_agent_rows_snapshot()
+
+    count = 0
+
+    for row in rows:
+        if row["url"] and not row["processed"]:
+            count += 1
+
+    return count
+
+
+def get_next_agent_task(direction, agent_name, run_id):
+    """
+    Claims and returns the next row for an agent.
+
+    direction:
+    - top = starts from top
+    - bottom = starts from bottom
+
+    Collision rule:
+    - If only one row is left, bottom stops and top processes it.
+    - If row is already claimed by another active agent, skip it.
+    - Claim is confirmed by writing token then reading it back.
+    """
+    direction = direction.lower().strip()
+
+    if direction not in ["top", "bottom"]:
+        raise ValueError("direction must be 'top' or 'bottom'")
+
+    sheet = get_sheet()
+    rows = get_agent_rows_snapshot()
+
+    unprocessed = [
+        r for r in rows
+        if r["url"] and not r["processed"]
+    ]
+
+    if not unprocessed:
+        return None
+
+    # If only one row remains, bottom stops so both agents do not collide.
+    if len(unprocessed) == 1 and direction == "bottom":
+        try:
+            add_log(
+                row_number="",
+                status="COLLISION_STOP",
+                log_type=agent_name,
+                message="Only one unprocessed row left. Bottom agent stopped to avoid collision."
+            )
+        except Exception:
+            pass
+
+        return "COLLISION_STOP"
+
+    if direction == "top":
+        candidates = sorted(unprocessed, key=lambda x: x["row_num"])
+    else:
+        candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=True)
+
+    for candidate in candidates:
+        row_num = candidate["row_num"]
+        url = candidate["url"]
+
+        # Skip active claims from another agent.
+        if (
+            candidate["claim_agent"]
+            and candidate["claim_agent"] != agent_name
+            and not candidate["claim_expired"]
+        ):
+            continue
+
+        token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
+        claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Claim row.
+        sheet.update(
+            f"I{row_num}:L{row_num}",
+            [[agent_name, claim_time, token, "CLAIMED"]]
+        )
+
+        # Confirm claim.
+        confirm = sheet.row_values(row_num)
+        confirmed_token = confirm[10].strip() if len(confirm) >= 11 else ""
+
+        if confirmed_token == token:
+            return row_num, url
+
+    return None
+
+
+def mark_agent_done(row_num, agent_name):
+    """
+    Marks claim as completed after scraper finishes the row.
+    """
+    try:
+        sheet = get_sheet()
+        sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
+    except Exception:
+        pass

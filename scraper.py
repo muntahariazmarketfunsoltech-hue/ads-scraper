@@ -582,62 +582,39 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 def extract_advertiser_from_page(page):
     """
-    Extract advertiser name from the top Ad details header area.
-    Example:
-    9D TECHNOLOGIES (SMC-PRIVATE) LIMITED
+    Extract advertiser name from top of the page.
+    Ignores generic labels, returns even short names.
     """
 
-    selectors = [
-        "h1",
-        "div[role='heading']",
-        "span[role='heading']",
+    bad_keywords = [
+        'ad details',
+        'last shown',
+        'format:',
+        'shown in',
+        'report this ad',
+        'see more ads',
+        'the information about this ad may vary',
+        'ads transparency centre'
     ]
 
+    # Try direct heading selectors first
+    selectors = ["h1", "div[role='heading']", "span[role='heading']"]
     for sel in selectors:
         try:
             loc = page.locator(sel)
             count = loc.count()
-
             for i in range(count):
-                try:
-                    text = loc.nth(i).inner_text(timeout=2000)
-                    text = clean_text(text)
-
-                    if text == "N/A":
-                        continue
-
-                    lower = text.lower()
-
-                    if lower == "ad details":
-                        continue
-
-                    if "last shown" in lower:
-                        continue
-
-                    if "format:" in lower:
-                        continue
-
-                    if "shown in" in lower:
-                        continue
-
-                    if "report this ad" in lower:
-                        continue
-
-                    if "see more ads" in lower:
-                        continue
-
-                    if "the information about this ad may vary" in lower:
-                        continue
-
-                    if len(text) >= 3:
-                        return text
-
-                except Exception:
+                text = loc.nth(i).inner_text(timeout=2000).strip()
+                if not text:
                     continue
-
+                lower = text.lower()
+                if any(b in lower for b in bad_keywords):
+                    continue
+                return text
         except Exception:
             continue
 
+    # JS fallback: find first non-generic text near top-left of page
     try:
         advertiser = page.evaluate("""
             () => {
@@ -648,58 +625,28 @@ def extract_advertiser_from_page(page):
                     'shown in',
                     'report this ad',
                     'see more ads',
-                    'the information about this ad may vary'
+                    'the information about this ad may vary',
+                    'ads transparency centre'
                 ];
-
                 const nodes = Array.from(document.querySelectorAll('body *'))
                     .map(el => {
                         const rect = el.getBoundingClientRect();
                         const style = window.getComputedStyle(el);
                         const text = (el.innerText || el.textContent || '').trim();
-
-                        return {
-                            text,
-                            x: rect.x,
-                            y: rect.y,
-                            w: rect.width,
-                            h: rect.height,
-                            font: parseFloat(style.fontSize || '0'),
-                            weight: style.fontWeight || ''
-                        };
+                        return { text, x: rect.x, y: rect.y, w: rect.width, h: rect.height, font: parseFloat(style.fontSize || '0') };
                     })
-                    .filter(item => {
-                        if (!item.text) return false;
-                        if (item.text.length < 3) return false;
-                        if (item.y < 0 || item.y > 250) return false;
-                        if (item.w < 80 || item.h < 10) return false;
-
-                        const t = item.text.toLowerCase();
-
-                        if (bad.some(b => t.includes(b))) return false;
-
-                        return true;
-                    });
-
-                nodes.sort((a, b) => {
-                    if (b.font !== a.font) return b.font - a.font;
-                    return a.y - b.y;
-                });
-
+                    .filter(item => item.text && item.y >= 0 && item.y < 250 && item.w>50 && item.h>10
+                                     && !bad.some(b => item.text.toLowerCase().includes(b)));
+                nodes.sort((a, b) => b.font - a.font || a.y - b.y);
                 return nodes.length ? nodes[0].text : null;
             }
         """)
-
-        advertiser = clean_text(advertiser)
-
-        if advertiser != "N/A":
-            return advertiser
-
+        if advertiser:
+            return advertiser.strip()
     except Exception:
         pass
 
     return "N/A"
-
-
 # =========================
 # MAIN SCRAPER
 # =========================
