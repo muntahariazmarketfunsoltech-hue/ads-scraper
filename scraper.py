@@ -329,11 +329,21 @@ def scrape_single_url(url_row):
         page.on("response", handle_response)
 
         try:
+            original_url = url
+
             if "region=" not in url:
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
             print(f"🔍 Checking row {row_num}: {url}")
+
+            sheets.add_log(
+                row_number=row_num,
+                status="STARTED",
+                log_type="VIDEO",
+                url=url,
+                message="Started checking video ad"
+            )
 
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
@@ -370,6 +380,15 @@ def scrape_single_url(url_row):
 
                 sheets.update_video_row(row_num, data)
 
+                sheets.add_log(
+                    row_number=row_num,
+                    status="NON_VIDEO",
+                    log_type="VIDEO",
+                    url=url,
+                    video_id="NON_VIDEO",
+                    message="No video detected"
+                )
+
                 print(f"⏭ Row {row_num} marked NON_VIDEO at {video_checked_time}")
                 return
 
@@ -390,38 +409,36 @@ def scrape_single_url(url_row):
 
             sheets.update_video_row(row_num, data)
 
+            sheets.add_log(
+                row_number=row_num,
+                status="SUCCESS",
+                log_type="VIDEO",
+                url=url,
+                video_id=video_id,
+                message="Video ID saved"
+            )
+
             print(f"✅ Row {row_num} saved video ID at {video_checked_time}: {video_id}")
 
         except Exception as e:
             print(f"❌ Error row {row_num}: {e}")
 
+            try:
+                sheets.add_log(
+                    row_number=row_num,
+                    status="ERROR",
+                    log_type="VIDEO",
+                    url=url,
+                    message=str(e)
+                )
+            except Exception:
+                pass
+
         finally:
             page.close()
             context.close()
             browser.close()
-sheets.add_log(
-    row_number=row_num,
-    status="SUCCESS",
-    log_type="VIDEO",
-    url=url,
-    video_id=video_id,
-    message="Video ID saved"
-)
-sheets.add_log(
-    row_number=row_num,
-    status="NON_VIDEO",
-    log_type="VIDEO",
-    url=url,
-    video_id="NON_VIDEO",
-    message="No video detected"
-)
-sheets.add_log(
-    row_number=row_num,
-    status="ERROR",
-    log_type="VIDEO",
-    url=url,
-    message=str(e)
-)
+
 
 def run_parallel_video_scraper(max_workers=3):
     urls = sheets.get_urls_with_retry()
