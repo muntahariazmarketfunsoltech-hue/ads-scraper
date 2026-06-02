@@ -5,60 +5,29 @@ import time
 from datetime import datetime, timedelta
 import uuid
 
-def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
-    """
-    Append a log row to your Google Sheet logs worksheet.
-    You can customize the sheet name for logs.
-    """
-    try:
-        LOG_SHEET_NAME = "logs"  # change to your logs sheet name
-        sheet = get_sheet()  # main sheet
-        client = sheet.spreadsheet
-        try:
-            log_sheet = client.worksheet(LOG_SHEET_NAME)
-        except gspread.exceptions.WorksheetNotFound:
-            log_sheet = client.add_worksheet(title=LOG_SHEET_NAME, rows="1000", cols="20")
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
-        log_row = [
-            timestamp,
-            row_number,
-            status,
-            log_type,
-            url,
-            video_id,
-            app_link,
-            message
-        ]
-        log_sheet.append_row(log_row)
-    except Exception as e:
-        print(f"⚠ Failed to write log: {e}")
-
-# Cache to reduce repeated API reads
+# --------------------------
+# Cached sheet to reduce API reads
+# --------------------------
 SHEET_CACHE = None
 SHEET_CACHE_TIME = None
-SHEET_CACHE_TTL = 60  # seconds before refreshing
+SHEET_CACHE_TTL = 60  # seconds
 
 CLAIM_AGENT_COL = 9
 CLAIM_TIME_COL = 10
 CLAIM_TOKEN_COL = 11
 CLAIM_STATUS_COL = 12
-CLAIM_TTL_MINUTES = 5  # for local testing; increase to 370 for production
+CLAIM_TTL_MINUTES = 5  # adjust to 370 for production
 
 # --------------------------
-# Sheet auth functions
+# Sheet auth
 # --------------------------
 def get_sheet():
-    """Authenticates and returns the Google Sheet worksheet."""
     global SHEET_CACHE, SHEET_CACHE_TIME
     now = time.time()
     if SHEET_CACHE and SHEET_CACHE_TIME and now - SHEET_CACHE_TIME < SHEET_CACHE_TTL:
         return SHEET_CACHE
 
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(config.CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
     sheet = client.open_by_key(config.SPREADSHEET_ID).worksheet(config.WORKSHEET_NAME)
@@ -67,26 +36,79 @@ def get_sheet():
     SHEET_CACHE_TIME = now
     return sheet
 
+
 def get_spreadsheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(config.CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
     return client.open_by_key(config.SPREADSHEET_ID)
 
+
 # --------------------------
-# Agent caching functions
+# Logs
+# --------------------------
+def get_or_create_logs_sheet():
+    spreadsheet = get_spreadsheet()
+    try:
+        logs_sheet = spreadsheet.worksheet("Logs")
+    except gspread.exceptions.WorksheetNotFound:
+        logs_sheet = spreadsheet.add_worksheet(title="Logs", rows=1000, cols=8)
+        logs_sheet.update("A1:H1", [[
+            "Time", "Row", "Status", "Type", "URL", "Video ID", "App Link", "Message"
+        ]])
+    return logs_sheet
+
+
+def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
+    try:
+        logs_sheet = get_or_create_logs_sheet()
+        timestamp = datetime.now().strftime("%I:%M:%S %p")
+        logs_sheet.append_row([timestamp, row_number, status, log_type, url, video_id, app_link, message])
+    except gspread.exceptions.APIError as e:
+        print(f"⚠ Failed to write log due to APIError: {e}")
+    except Exception as e:
+        print(f"⚠ Failed to write log: {e}")
+
+
+# --------------------------
+# Agent helpers
+# --------------------------
+def ensure_agent_headers():
+    sheet = get_sheet()
+    headers = sheet.row_values(1)
+    required = {9: "Agent", 10: "Claim Time", 11: "Claim Token", 12: "Claim Status"}
+    updates = []
+    for col, name in required.items():
+        current = headers[col - 1] if len(headers) >= col else ""
+        if current != name:
+            col_letter = chr(64 + col)
+            updates.append({"range": f"{col_letter}1", "values": [[name]]})
+    if updates:
+        sheet.batch_update(updates)
+
+
+def is_claim_expired(claim_time_text):
+    if not claim_time_text:
+        return True
+    try:
+        claim_time = datetime.strptime(claim_time_text, "%Y-%m-%d %H:%M:%S")
+        return datetime.now() - claim_time > timedelta(minutes=CLAIM_TTL_MINUTES)
+    except Exception:
+        return True
+
+
+def is_processed_video_value(value):
+    value = str(value or "").strip()
+    return bool(value)
+
+
+# --------------------------
+# Sheet snapshot with retry
 # --------------------------
 def get_agent_rows_snapshot():
-    """
-    Reads main sheet once per agent run and caches it to reduce API calls.
-    """
     ensure_agent_headers()
     sheet = get_sheet()
-    
-    # Retry with backoff for 429
+
     for attempt in range(5):
         try:
             values = sheet.get_all_values()
@@ -128,36 +150,32 @@ def get_agent_rows_snapshot():
             "processed": is_processed_video_value(video_id),
             "claim_expired": is_claim_expired(claim_time)
         })
-
     return rows
 
+
 # --------------------------
-# Update get_next_agent_task to use cached rows
+# Agent row handling
 # --------------------------
+def count_unprocessed_rows():
+    rows = get_agent_rows_snapshot()
+    return sum(1 for r in rows if r["url"] and not r["processed"])
+
+
 def get_next_agent_task(direction, agent_name, run_id):
-    """
-    Claims and returns the next row for an agent.
-    """
     direction = direction.lower().strip()
     if direction not in ["top", "bottom"]:
         raise ValueError("direction must be 'top' or 'bottom'")
 
-    # Use snapshot instead of reading sheet every time
     rows = get_agent_rows_snapshot()
     unprocessed = [r for r in rows if r["url"] and not r["processed"]]
 
     if not unprocessed:
         return None
 
-    # Collision rule
     if len(unprocessed) == 1 and direction == "bottom":
         try:
-            add_log(
-                row_number="",
-                status="COLLISION_STOP",
-                log_type=agent_name,
-                message="Only one unprocessed row left. Bottom agent stopped to avoid collision."
-            )
+            add_log(row_number="", status="COLLISION_STOP", log_type=agent_name,
+                    message="Only one unprocessed row left. Bottom agent stopped to avoid collision.")
         except Exception:
             pass
         return "COLLISION_STOP"
@@ -174,15 +192,19 @@ def get_next_agent_task(direction, agent_name, run_id):
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Claim the row
-        sheet = get_sheet()
         sheet.update(f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
 
-        # Confirm claim
         confirm = sheet.row_values(row_num)
         confirmed_token = confirm[10].strip() if len(confirm) >= 11 else ""
 
         if confirmed_token == token:
             return row_num, url
-
     return None
+
+
+def mark_agent_done(row_num, agent_name):
+    try:
+        sheet = get_sheet()
+        sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
+    except Exception:
+        pass
