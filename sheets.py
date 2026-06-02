@@ -43,7 +43,23 @@ def get_spreadsheet():
     client = gspread.authorize(creds)
     return client.open_by_key(config.SPREADSHEET_ID)
 
-
+def update_combined_row(row_index, data):
+    """
+    Writes combined row data for processed ad:
+    A = Advertiser
+    B = Name (if needed)
+    C = Ad URL
+    D = App Link
+    E = App Link Time
+    F = Video ID
+    G = Video ID Time
+    """
+    sheet = get_sheet()
+    cell_range = f"A{row_index}:G{row_index}"
+    try:
+        sheet.update(cell_range, [data])
+    except gspread.exceptions.APIError as e:
+        print(f"⚠ Failed to update row {row_index}: {e}")
 # --------------------------
 # Logs
 # --------------------------
