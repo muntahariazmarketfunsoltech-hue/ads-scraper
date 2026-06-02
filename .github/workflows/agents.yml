@@ -6,19 +6,16 @@ on:
 jobs:
   top-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # 5 hours 50 minutes
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Create creds.json safely from the multiline secret
-      - name: Create creds.json from secret
+      - name: Create creds.json safely from secret
         shell: bash
         run: |
-          cat <<'EOF' > creds.json
-       ${{ secrets.CREDS_JSON }}
-       EOF
+          echo "${{ secrets.CREDS_JSON }}" > creds.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,13 +39,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Create creds.json safely from the multiline secret
-      - name: Create creds.json from secret
+      - name: Create creds.json safely from secret
         shell: bash
         run: |
-          cat <<'EOF' > creds.json
-           ${{ secrets.CREDS_JSON }}
-       EOF
+          echo "${{ secrets.CREDS_JSON }}" > creds.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
