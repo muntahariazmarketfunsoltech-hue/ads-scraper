@@ -6,14 +6,17 @@ on:
 jobs:
   top-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 350  # 5 hours 50 minutes
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      # Create creds.json from the new GitHub Secret
       - name: Create creds.json from secret
         run: |
-          echo "${{ secrets.GOOGLE_CREDS_JSON }}" > creds.json
+          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -35,6 +38,11 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      # Create creds.json from the new GitHub Secret
+      - name: Create creds.json from secret
+        run: |
+          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
