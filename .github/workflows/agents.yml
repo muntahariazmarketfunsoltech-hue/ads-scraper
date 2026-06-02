@@ -14,7 +14,9 @@ jobs:
       - name: Create creds.json safely from secret
         shell: bash
         run: |
-          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
+          cat <<'EOF' > creds.json
+          ${{ secrets.CREDS_JSON }}
+          EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,7 +42,9 @@ jobs:
       - name: Create creds.json safely from secret
         shell: bash
         run: |
-          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
+          cat <<'EOF' > creds.json
+          ${{ secrets.CREDS_JSON }}
+          EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
