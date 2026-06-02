@@ -11,7 +11,9 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
+      - name: Create creds.json from secret
+        run: |
+          echo "${{ secrets.GOOGLE_CREDS_JSON }}" > creds.json
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
