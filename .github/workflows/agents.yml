@@ -7,17 +7,14 @@ jobs:
   top-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-       - name: Create creds.json safely from secret
-  shell: bash
-  run: |
-    cat <<'EOF' > creds.json
-      ${{ secrets.CREDS_JSON }}
-     EOF
+      - name: Create creds.json safely from secret
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,17 +33,14 @@ jobs:
   bottom-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Create creds.json safely from secret
-  shell: bash
-  run: |
-    cat <<'EOF' > creds.json
-       ${{ secrets.CREDS_JSON }}
-    EOF
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
