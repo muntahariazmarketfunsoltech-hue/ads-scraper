@@ -166,6 +166,8 @@ def get_next_agent_task(direction, agent_name, run_id):
     if direction not in ["top", "bottom"]:
         raise ValueError("direction must be 'top' or 'bottom'")
 
+    sheet = get_sheet()  # <-- Add this line
+
     rows = get_agent_rows_snapshot()
     unprocessed = [r for r in rows if r["url"] and not r["processed"]]
 
@@ -192,6 +194,7 @@ def get_next_agent_task(direction, agent_name, run_id):
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Claim the row
         sheet.update(f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
 
         confirm = sheet.row_values(row_num)
@@ -199,6 +202,7 @@ def get_next_agent_task(direction, agent_name, run_id):
 
         if confirmed_token == token:
             return row_num, url
+
     return None
 
 
