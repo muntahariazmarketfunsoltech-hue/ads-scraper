@@ -12,10 +12,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Create creds.json from the new GitHub Secret
+      # Create creds.json safely from multiline secret
       - name: Create creds.json from secret
+        shell: bash
         run: |
-          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
+          cat <<EOF > creds.json
+${{ secrets.CREDS_JSON }}
+EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,10 +42,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Create creds.json from the new GitHub Secret
+      # Create creds.json safely from multiline secret
       - name: Create creds.json from secret
+        shell: bash
         run: |
-          printf '%s' "${{ secrets.CREDS_JSON }}" > creds.json
+          cat <<EOF > creds.json
+${{ secrets.CREDS_JSON }}
+EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
