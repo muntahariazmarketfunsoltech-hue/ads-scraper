@@ -5,6 +5,35 @@ import time
 from datetime import datetime, timedelta
 import uuid
 
+def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
+    """
+    Append a log row to your Google Sheet logs worksheet.
+    You can customize the sheet name for logs.
+    """
+    try:
+        LOG_SHEET_NAME = "logs"  # change to your logs sheet name
+        sheet = get_sheet()  # main sheet
+        client = sheet.spreadsheet
+        try:
+            log_sheet = client.worksheet(LOG_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            log_sheet = client.add_worksheet(title=LOG_SHEET_NAME, rows="1000", cols="20")
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+        log_row = [
+            timestamp,
+            row_number,
+            status,
+            log_type,
+            url,
+            video_id,
+            app_link,
+            message
+        ]
+        log_sheet.append_row(log_row)
+    except Exception as e:
+        print(f"⚠ Failed to write log: {e}")
+
 # Cache to reduce repeated API reads
 SHEET_CACHE = None
 SHEET_CACHE_TIME = None

@@ -69,15 +69,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Create creds.json from secret
+      - name: Create creds.json safely from secret
+        shell: bash
+        run: |
+          cat <<'EOF' > creds.json
+          ${{ secrets.CREDS_JSON }}
+          EOF
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Check remaining rows
-        run: |
-          python check_remaining.py
+        run: python check_remaining.py
