@@ -651,7 +651,98 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 # ADVERTISER LOGIC
 # =========================
 
+# =========================
+# ADVERTISER LOGIC
+# =========================
+
 def extract_advertiser_from_page(page):
+    """
+    Extract advertiser name from the top of the page.
+    Primary: Uses the explicit 'advertiser-title' class for perfect accuracy.
+    Fallback: Scans leaf nodes for the largest text near the top (for headless Linux).
+    """
+    
+    # STRATEGY 1: Exact Class Match (Highly Reliable!)
+    try:
+        loc = page.locator('.advertiser-title')
+        if loc.count() > 0:
+            text = loc.nth(0).inner_text(timeout=1500).strip()
+            if text and len(text) > 1:
+                return text
+    except Exception:
+        pass
+
+    # STRATEGY 2: Visual Fallback (If Google temporarily changes their HTML classes)
+    js = r"""
+    () => {
+        const badExact = [
+            'ad details', 'last shown', 'format:', 'shown in', 'report this ad',
+            'see more ads', 'ads transparency centre', 'ads transparency center',
+            'faqs', 'privacy', 'terms', 'policies', 'home', 'sign in', 'sign up', 
+            'log in', 'close', 'menu', 'keyboard_arrow_right', 'arrow_back', 
+            'arrow_forward', 'chevron_left', 'chevron_right'
+        ];
+        
+        const elements = Array.from(document.querySelectorAll('body *'));
+        let candidates = [];
+        
+        for (let i = 0; i < elements.length; i++) {
+            let el = elements[i];
+            
+            if (el.childElementCount > 0) continue;
+            
+            const text = (el.innerText || el.textContent || "").trim();
+            if (text.length < 2 || text.length > 80 || text.includes('\n')) continue;
+            
+            const lower = text.toLowerCase();
+            if (badExact.includes(lower)) continue;
+            if (lower.includes('information about this ad')) continue;
+            if (lower.includes('cookie')) continue;
+            
+            const rect = el.getBoundingClientRect();
+            if (rect.y < 0 || rect.y > 450 || rect.width < 10 || rect.height < 10) continue;
+            
+            const style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
+            
+            candidates.push({
+                text: text,
+                y: rect.y,
+                x: rect.x,
+                font: parseFloat(style.fontSize || '0'),
+                domIndex: i
+            });
+        }
+        
+        let unique = [];
+        let seen = new Set();
+        for (let c of candidates) {
+            if (!seen.has(c.text)) {
+                seen.add(c.text);
+                unique.push(c);
+            }
+        }
+        
+        if (unique.length === 0) return null;
+        
+        unique.sort((a, b) => {
+            if (b.font !== a.font) return b.font - a.font; 
+            if (a.y !== b.y) return a.y - b.y;
+            return a.domIndex - b.domIndex;
+        });
+        
+        return unique[0].text;
+    }
+    """
+    
+    try:
+        advertiser = page.evaluate(js)
+        if advertiser:
+            return advertiser
+    except Exception:
+        pass
+        
+    return "N/A"
     """
     Extract advertiser name from the top of the page.
     Strictly scans 'leaf nodes' to prevent reading giant UI wrappers,
