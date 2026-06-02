@@ -12,10 +12,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Create creds.json safely from secret
-        shell: bash
-        run: |
-          echo "${{ secrets.CREDS_JSON }}" > creds.json
+       - name: Create creds.json safely from secret
+  shell: bash
+  run: |
+    cat <<'EOF' > creds.json
+      ${{ secrets.CREDS_JSON }}
+     EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,9 +42,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create creds.json safely from secret
-        shell: bash
-        run: |
-          echo "${{ secrets.CREDS_JSON }}" > creds.json
+  shell: bash
+  run: |
+    cat <<'EOF' > creds.json
+       ${{ secrets.CREDS_JSON }}
+    EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
