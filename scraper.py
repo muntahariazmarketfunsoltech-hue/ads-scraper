@@ -32,18 +32,17 @@ def safe_update_combined_row(row_num, data):
         sheets.update_combined_row(row_num, data)
 
 
-def safe_add_log(
-    row_number,
-    status,
-    log_type,
-    url="",
-    video_id="",
-    app_link="",
-    message=""
-):
+def safe_update_headline_desc(row_num, headline, description):
+    """
+    Thread-safe Google Sheet row update for Headline and Description in cols M and N.
+    """
+    with SHEET_LOCK:
+        sheets.update_headline_and_description(row_num, headline, description)
+
+
+def safe_add_log(row_number, status, log_type, url="", video_id="", app_link="", message=""):
     """
     Thread-safe log writing.
-    Prevents parallel threads from writing logs at the same time.
     """
     with SHEET_LOCK:
         sheets.add_log(
@@ -64,12 +63,11 @@ def get_exact_time():
 def clean_text(value):
     if not value:
         return "N/A"
-
     return re.sub(r"\s+", " ", str(value)).strip() or "N/A"
 
 
 # =========================
-# VIDEO ID LOGIC
+# VIDEO ID LOGIC (REVERTED TO YOUR ORIGINAL WORKING LOGIC)
 # =========================
 
 def is_real_video_response(response):
@@ -473,10 +471,9 @@ def extract_install_link_by_precise_js(page):
     only install-button-anchor / Install text links,
     not every googleadservices link.
     """
-    js = """
+    js = r"""
     () => {
         const anchors = Array.from(document.querySelectorAll('a[href], a[data-href]'));
-
         const candidates = anchors.map(a => {
             const href = a.href || a.getAttribute('href') || a.getAttribute('data-href') || '';
             const text = (a.innerText || a.textContent || '').trim().toLowerCase();
@@ -510,18 +507,14 @@ def extract_install_link_by_precise_js(page):
             }
 
             let score = 0;
-
             if (cls.includes('install-button-anchor')) score += 100;
             if (text.includes('install')) score += 80;
             if (text.includes('get') || text.includes('download')) score += 40;
-
             const cx = rect.left + rect.width / 2;
             const cy = rect.top + rect.height / 2;
-
             if (cx >= 350 && cx <= 850) score += 40;
             if (cy >= 50 && cy <= 700) score += 40;
             if (cy > 700) score -= 100;
-
             return {
                 href,
                 score
@@ -577,76 +570,174 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
+# HEADLINE AND DESCRIPTION LOGIC
+# =========================
+
+def wait_and_extract_headline_description(page, max_wait_seconds=15):
+    """
+    Polls for Headline and Description inside iframes ONLY.
+    Uses structural class patterns (-e-15, -e-67) and visibility checks 
+    to avoid grabbing hidden template text.
+    """
+    js = r"""
+    () => {
+        let headText = "N/A";
+        let descText = "N/A";
+
+        // Helper to ensure we don't grab hidden/template elements
+        const isVisible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+        };
+
+        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
+        const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
+        for (let el of headNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                // Ensure it's not a template placeholder like {{headline}}
+                if (text.length > 1 && !text.includes('{{')) { 
+                    headText = text; 
+                    break; 
+                }
+            }
+        }
+
+        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
+        const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
+        for (let el of descNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                if (text.length > 1 && text !== headText && !text.includes('{{')) { 
+                    descText = text; 
+                    break; 
+                }
+            }
+        }
+
+        // If we found either one, return it
+        if (headText !== "N/A" || descText !== "N/A") {
+            return { headline: headText, description: descText };
+        }
+
+        return null;
+    }
+    """
+
+    start = time.time()
+    
+    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
+    while time.time() - start < max_wait_seconds:
+        
+        # STRICTLY CHECK IFRAMES ONLY.
+        for frame in page.frames:
+            try:
+                result = frame.evaluate(js)
+                if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
+                    return result.get("headline", "N/A"), result.get("description", "N/A")
+            except Exception:
+                continue
+        
+        # Wait 1 second and loop again to let the ad iframe fully load
+        page.wait_for_timeout(1000)
+
+    # If the timer runs out, return N/A
+    return "N/A", "N/A"
+
+
+# =========================
 # ADVERTISER LOGIC
 # =========================
 
 def extract_advertiser_from_page(page):
     """
-    Extract advertiser name from top of the page.
-    Ignores generic labels, returns even short names.
+    Extract advertiser name from the top of the page.
+    Strictly scans 'leaf nodes' to prevent reading giant UI wrappers,
+    and ignores common Google Ads Transparency UI text.
     """
-
-    bad_keywords = [
-        'ad details',
-        'last shown',
-        'format:',
-        'shown in',
-        'report this ad',
-        'see more ads',
-        'the information about this ad may vary',
-        'ads transparency centre'
-    ]
-
-    # Try direct heading selectors first
-    selectors = ["h1", "div[role='heading']", "span[role='heading']"]
-    for sel in selectors:
-        try:
-            loc = page.locator(sel)
-            count = loc.count()
-            for i in range(count):
-                text = loc.nth(i).inner_text(timeout=2000).strip()
-                if not text:
-                    continue
-                lower = text.lower()
-                if any(b in lower for b in bad_keywords):
-                    continue
-                return text
-        except Exception:
-            continue
-
-    # JS fallback: find first non-generic text near top-left of page
-    try:
-        advertiser = page.evaluate("""
-            () => {
-                const bad = [
-                    'ad details',
-                    'last shown',
-                    'format:',
-                    'shown in',
-                    'report this ad',
-                    'see more ads',
-                    'the information about this ad may vary',
-                    'ads transparency centre'
-                ];
-                const nodes = Array.from(document.querySelectorAll('body *'))
-                    .map(el => {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        const text = (el.innerText || el.textContent || '').trim();
-                        return { text, x: rect.x, y: rect.y, w: rect.width, h: rect.height, font: parseFloat(style.fontSize || '0') };
-                    })
-                    .filter(item => item.text && item.y >= 0 && item.y < 250 && item.w>50 && item.h>10
-                                     && !bad.some(b => item.text.toLowerCase().includes(b)));
-                nodes.sort((a, b) => b.font - a.font || a.y - b.y);
-                return nodes.length ? nodes[0].text : null;
+    js = r"""
+    () => {
+        const badExact = [
+            'ad details', 'last shown', 'format:', 'shown in', 'report this ad',
+            'see more ads', 'ads transparency centre', 'ads transparency center',
+            'faqs', 'privacy', 'terms', 'policies', 'home', 'sign in', 'sign up', 
+            'log in', 'close', 'menu', 'keyboard_arrow_right', 'arrow_back', 
+            'arrow_forward', 'chevron_left', 'chevron_right'
+        ];
+        
+        // Get absolutely every element on the page
+        const elements = Array.from(document.querySelectorAll('body *'));
+        let candidates = [];
+        
+        for (let el of elements) {
+            // CRITICAL FIX: Must be a leaf node (no child elements inside it).
+            // This prevents grabbing the giant navigation menu wrapper.
+            if (el.childElementCount > 0) continue;
+            
+            const text = (el.innerText || el.textContent || "").trim();
+            
+            // Ignore blank text, giant paragraphs, or text with line breaks
+            if (text.length < 2 || text.length > 80 || text.includes('\n')) continue;
+            
+            const lower = text.toLowerCase();
+            
+            // Ignore precise UI keywords
+            if (badExact.includes(lower)) continue;
+            if (lower.includes('information about this ad')) continue;
+            
+            const rect = el.getBoundingClientRect();
+            
+            // The advertiser name is always in the top header area (Y < 250)
+            if (rect.y < 0 || rect.y > 250 || rect.width < 10 || rect.height < 10) continue;
+            
+            // Ignore hidden elements
+            const style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
+            
+            candidates.push({
+                text: text,
+                y: rect.y,
+                x: rect.x,
+                font: parseFloat(style.fontSize || '0')
+            });
+        }
+        
+        // Remove duplicates
+        let unique = [];
+        let seen = new Set();
+        for (let c of candidates) {
+            if (!seen.has(c.text)) {
+                seen.add(c.text);
+                unique.push(c);
             }
-        """)
+        }
+        
+        if (unique.length === 0) return null;
+        
+        // The advertiser name is consistently the largest text near the top of the page.
+        // Sort by largest font size first, then by closest to the top.
+        unique.sort((a, b) => {
+            if (b.font !== a.font) return b.font - a.font; 
+            return a.y - b.y; 
+        });
+        
+        return unique[0].text;
+    }
+    """
+    
+    try:
+        # Run the JS exclusively on the main page (Advertiser name is never inside the iframe)
+        advertiser = page.evaluate(js)
         if advertiser:
-            return advertiser.strip()
+            return advertiser
     except Exception:
         pass
-
+        
     return "N/A"
+
+
 # =========================
 # MAIN SCRAPER
 # =========================
@@ -677,6 +768,7 @@ def scrape_single_url(url_row):
         page = context.new_page()
         captured = {"video_id": "N/A"}
 
+        # We reverted this back to your original clean response handler!
         def handle_response(response):
             try:
                 if not is_real_video_response(response):
@@ -729,6 +821,7 @@ def scrape_single_url(url_row):
                 ]
 
                 safe_update_combined_row(row_num, data)
+                safe_update_headline_desc(row_num, "N/A", "N/A")
 
                 safe_add_log(
                     row_number=row_num,
@@ -748,6 +841,9 @@ def scrape_single_url(url_row):
             app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
             app_link_time = get_exact_time()
 
+            # Step 4: Extract Headline and Description
+            headline, description = wait_and_extract_headline_description(page, max_wait_seconds=15)
+
             if app_link == "N/A":
                 status = "VIDEO_FOUND_APP_LINK_NOT_FOUND"
                 message = "Video ID found, but exact visible install link not found"
@@ -766,6 +862,7 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
+            safe_update_headline_desc(row_num, headline, description)
 
             safe_add_log(
                 row_number=row_num,
@@ -777,7 +874,7 @@ def scrape_single_url(url_row):
                 message=message
             )
 
-            print(f"✅ Row {row_num}: saved advertiser + video ID + app link")
+            print(f"✅ Row {row_num}: saved advertiser + video ID + app link + text")
 
         except Exception as e:
             error_time = get_exact_time()
@@ -796,6 +893,7 @@ def scrape_single_url(url_row):
                 ]
 
                 safe_update_combined_row(row_num, data)
+                safe_update_headline_desc(row_num, "N/A", "N/A")
             except Exception:
                 pass
 
@@ -856,7 +954,7 @@ def run_parallel_combined_scraper(max_workers=2):
                 except Exception:
                     pass
 
-    print("✅ Finished combined video ID + app link scraping")
+    print("✅ Finished combined scraping")
 
 
 if __name__ == "__main__":
