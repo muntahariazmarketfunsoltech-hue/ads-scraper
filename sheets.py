@@ -18,6 +18,9 @@ CLAIM_TOKEN_COL = 11
 CLAIM_STATUS_COL = 12
 CLAIM_TTL_MINUTES = 5  # adjust to 370 for production
 
+LOG_BATCH_SIZE = 5  # batch logs to reduce API calls
+LOG_CACHE = []
+
 # --------------------------
 # Sheet auth
 # --------------------------
@@ -43,23 +46,6 @@ def get_spreadsheet():
     client = gspread.authorize(creds)
     return client.open_by_key(config.SPREADSHEET_ID)
 
-def update_combined_row(row_index, data):
-    """
-    Writes combined row data for processed ad:
-    A = Advertiser
-    B = Name (if needed)
-    C = Ad URL
-    D = App Link
-    E = App Link Time
-    F = Video ID
-    G = Video ID Time
-    """
-    sheet = get_sheet()
-    cell_range = f"A{row_index}:G{row_index}"
-    try:
-        sheet.update(cell_range, [data])
-    except gspread.exceptions.APIError as e:
-        print(f"⚠ Failed to update row {row_index}: {e}")
 # --------------------------
 # Logs
 # --------------------------
@@ -75,15 +61,25 @@ def get_or_create_logs_sheet():
     return logs_sheet
 
 
-def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
+def flush_logs():
+    """Batch append logs to reduce quota usage"""
+    global LOG_CACHE
+    if not LOG_CACHE:
+        return
     try:
         logs_sheet = get_or_create_logs_sheet()
-        timestamp = datetime.now().strftime("%I:%M:%S %p")
-        logs_sheet.append_row([timestamp, row_number, status, log_type, url, video_id, app_link, message])
+        logs_sheet.append_rows(LOG_CACHE)
+        LOG_CACHE = []
     except gspread.exceptions.APIError as e:
-        print(f"⚠ Failed to write log due to APIError: {e}")
-    except Exception as e:
-        print(f"⚠ Failed to write log: {e}")
+        print(f"⚠ Failed to flush logs due to APIError: {e}")
+
+
+def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
+    global LOG_CACHE
+    timestamp = datetime.now().strftime("%I:%M:%S %p")
+    LOG_CACHE.append([timestamp, row_number, status, log_type, url, video_id, app_link, message])
+    if len(LOG_CACHE) >= LOG_BATCH_SIZE:
+        flush_logs()
 
 
 # --------------------------
@@ -146,6 +142,7 @@ def get_agent_rows_snapshot():
 
         url = row[7].strip() if len(row) >= 8 else ""
         video_id = row[5].strip() if len(row) >= 6 else ""
+        stop_flag = row[12].strip() if len(row) >= 13 else ""  # optional Stop Flag column
 
         claim_agent = row[8].strip() if len(row) >= 9 else ""
         claim_time = row[9].strip() if len(row) >= 10 else ""
@@ -163,6 +160,7 @@ def get_agent_rows_snapshot():
             "claim_time": claim_time,
             "claim_token": claim_token,
             "claim_status": claim_status,
+            "stop_flag": stop_flag,
             "processed": is_processed_video_value(video_id),
             "claim_expired": is_claim_expired(claim_time)
         })
@@ -182,8 +180,7 @@ def get_next_agent_task(direction, agent_name, run_id):
     if direction not in ["top", "bottom"]:
         raise ValueError("direction must be 'top' or 'bottom'")
 
-    sheet = get_sheet()  # <-- Add this line
-
+    sheet = get_sheet()  # needed to update claims
     rows = get_agent_rows_snapshot()
     unprocessed = [r for r in rows if r["url"] and not r["processed"]]
 
@@ -194,6 +191,7 @@ def get_next_agent_task(direction, agent_name, run_id):
         try:
             add_log(row_number="", status="COLLISION_STOP", log_type=agent_name,
                     message="Only one unprocessed row left. Bottom agent stopped to avoid collision.")
+            flush_logs()
         except Exception:
             pass
         return "COLLISION_STOP"
@@ -204,15 +202,20 @@ def get_next_agent_task(direction, agent_name, run_id):
         row_num = candidate["row_num"]
         url = candidate["url"]
 
+        if candidate["stop_flag"].upper() == "STOP":
+            print(f"🛑 {agent_name}: Stop flag detected. Stopping agent.")
+            return "COLLISION_STOP"
+
         if candidate["claim_agent"] and candidate["claim_agent"] != agent_name and not candidate["claim_expired"]:
             continue
 
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Claim the row
+        # Claim row
         sheet.update(f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
 
+        # Confirm claim
         confirm = sheet.row_values(row_num)
         confirmed_token = confirm[10].strip() if len(confirm) >= 11 else ""
 
@@ -228,3 +231,13 @@ def mark_agent_done(row_num, agent_name):
         sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
     except Exception:
         pass
+
+
+def update_combined_row(row_index, data):
+    """Writes combined row data to columns A-G"""
+    sheet = get_sheet()
+    cell_range = f"A{row_index}:G{row_index}"
+    try:
+        sheet.update(cell_range, [data])
+    except gspread.exceptions.APIError as e:
+        print(f"⚠ Failed to update row {row_index}: {e}")
