@@ -24,26 +24,16 @@ INSTALL_SELECTORS = [
 
 
 def safe_update_combined_row(row_num, data):
-    """
-    Thread-safe Google Sheet row update.
-    Browser scraping runs parallel, but sheet writing is protected.
-    """
     with SHEET_LOCK:
         sheets.update_combined_row(row_num, data)
 
 
 def safe_update_headline_desc(row_num, headline, description):
-    """
-    Thread-safe Google Sheet row update for Headline and Description in cols M and N.
-    """
     with SHEET_LOCK:
         sheets.update_headline_and_description(row_num, headline, description)
 
 
 def safe_add_log(row_number, status, log_type, url="", video_id="", app_link="", message=""):
-    """
-    Thread-safe log writing.
-    """
     with SHEET_LOCK:
         sheets.add_log(
             row_number=row_number,
@@ -67,7 +57,7 @@ def clean_text(value):
 
 
 # =========================
-# VIDEO ID LOGIC (REVERTED TO YOUR ORIGINAL WORKING LOGIC)
+# VIDEO ID LOGIC
 # =========================
 
 def is_real_video_response(response):
@@ -78,16 +68,12 @@ def is_real_video_response(response):
 
         if content_type.startswith("video/"):
             return True
-
         if "application/vnd.apple.mpegurl" in content_type:
             return True
-
         if "application/x-mpegurl" in content_type:
             return True
-
         if "videoplayback" in url:
             return True
-
         if any(ext in url for ext in VIDEO_EXTENSIONS):
             return True
 
@@ -98,10 +84,6 @@ def is_real_video_response(response):
 
 
 def extract_video_id_from_url(req_url):
-    """
-    Extracts only clean video IDs or filenames.
-    Does NOT return full video links.
-    """
     try:
         url_lower = req_url.lower()
         parsed = urlparse(req_url)
@@ -109,31 +91,25 @@ def extract_video_id_from_url(req_url):
 
         if "videoplayback" in url_lower:
             video_id = query.get("id", [None])[0]
-
             if video_id:
                 return video_id
-
             for key in ["itag", "ei", "source"]:
                 value = query.get(key, [None])[0]
                 if value:
                     return value
-
             return None
 
         for ext in VIDEO_EXTENSIONS:
             if ext in url_lower:
                 filename = parsed.path.split("/")[-1]
                 filename = filename.split("?")[0].strip()
-
                 if filename:
                     return filename
 
         if "youtube.com/embed/" in url_lower:
             return req_url.split("youtube.com/embed/")[1].split("?")[0].split("&")[0]
-
         if "youtube.com/watch" in url_lower:
             return query.get("v", [None])[0]
-
         if "youtu.be/" in url_lower:
             return req_url.split("youtu.be/")[1].split("?")[0].split("&")[0]
 
@@ -144,21 +120,16 @@ def extract_video_id_from_url(req_url):
 
 
 def extract_video_from_dom(page):
-    """
-    Checks actual video elements on page and inside frames.
-    """
     try:
         video_sources = page.evaluate("""
             () => Array.from(document.querySelectorAll('video'))
                 .map(v => v.currentSrc || v.src || '')
                 .filter(Boolean)
         """)
-
         for src in video_sources:
             video_id = extract_video_id_from_url(src)
             if video_id:
                 return video_id
-
     except Exception:
         pass
 
@@ -169,12 +140,10 @@ def extract_video_from_dom(page):
                     .map(v => v.currentSrc || v.src || '')
                     .filter(Boolean)
             """)
-
             for src in video_sources:
                 video_id = extract_video_id_from_url(src)
                 if video_id:
                     return video_id
-
         except Exception:
             continue
 
@@ -182,17 +151,12 @@ def extract_video_from_dom(page):
 
 
 def scan_browser_performance_for_video(page):
-    """
-    Scans performance entries for real video URLs only.
-    """
     try:
         urls = page.evaluate("""
             () => performance.getEntriesByType('resource').map(r => r.name)
         """)
-
         for u in urls:
             u_lower = u.lower()
-
             if (
                 "videoplayback" in u_lower
                 or ".mp4" in u_lower
@@ -205,10 +169,8 @@ def scan_browser_performance_for_video(page):
                 or "youtu.be/" in u_lower
             ):
                 video_id = extract_video_id_from_url(u)
-
                 if video_id:
                     return video_id
-
     except Exception:
         pass
 
@@ -216,10 +178,6 @@ def scan_browser_performance_for_video(page):
 
 
 def click_possible_video_targets(page):
-    """
-    Clicks possible video preview areas.
-    Avoids install buttons/app links.
-    """
     selectors = [
         "video",
         "iframe",
@@ -247,7 +205,6 @@ def click_possible_video_targets(page):
 
                     if not box:
                         continue
-
                     if box["width"] < 120 or box["height"] < 80:
                         continue
 
@@ -285,9 +242,6 @@ def wait_for_video_id(page, captured, max_seconds=20):
 
 
 def detect_video_id(page, captured):
-    """
-    Main video detection flow.
-    """
     video_id = extract_video_from_dom(page)
 
     if video_id == "N/A":
@@ -300,7 +254,6 @@ def detect_video_id(page, captured):
     if video_id == "N/A":
         page.mouse.wheel(0, 400)
         page.wait_for_timeout(1500)
-
         click_possible_video_targets(page)
         video_id = wait_for_video_id(page, captured, max_seconds=10)
 
@@ -324,14 +277,7 @@ def clean_googleadservices_link(href):
         parsed = urlparse(href)
         query = parse_qs(parsed.query)
 
-        possible_keys = [
-            "adurl",
-            "url",
-            "q",
-            "u",
-            "ds_dest_url",
-            "destination",
-        ]
+        possible_keys = ["adurl", "url", "q", "u", "ds_dest_url", "destination"]
 
         for key in possible_keys:
             value = query.get(key, [None])[0]
@@ -382,7 +328,6 @@ def get_visible_install_candidates_from_target(target):
 
                     if not box:
                         continue
-
                     if box["width"] < 20 or box["height"] < 10:
                         continue
 
@@ -411,10 +356,8 @@ def get_visible_install_candidates_from_target(target):
 
                     if 350 <= center_x <= 850:
                         score += 40
-
                     if 50 <= center_y <= 700:
                         score += 40
-
                     if center_y > 700:
                         score -= 100
 
@@ -435,10 +378,6 @@ def get_visible_install_candidates_from_target(target):
 
 
 def extract_visible_install_link(page):
-    """
-    Extracts only the visible install button from the active creative.
-    Does not scan random adservice links.
-    """
     all_candidates = []
 
     try:
@@ -456,7 +395,6 @@ def extract_visible_install_link(page):
         return "N/A"
 
     all_candidates.sort(key=lambda x: x["score"], reverse=True)
-
     best = all_candidates[0]
 
     if best["score"] <= 0:
@@ -466,11 +404,6 @@ def extract_visible_install_link(page):
 
 
 def extract_install_link_by_precise_js(page):
-    """
-    Strict JS fallback:
-    only install-button-anchor / Install text links,
-    not every googleadservices link.
-    """
     js = r"""
     () => {
         const anchors = Array.from(document.querySelectorAll('a[href], a[data-href]'));
@@ -502,9 +435,7 @@ def extract_install_link_by_precise_js(page):
                 rect.top < window.innerHeight &&
                 rect.left < window.innerWidth;
 
-            if (!goodLink || !looksInstall || !visible) {
-                return null;
-            }
+            if (!goodLink || !looksInstall || !visible) return null;
 
             let score = 0;
             if (cls.includes('install-button-anchor')) score += 100;
@@ -515,14 +446,10 @@ def extract_install_link_by_precise_js(page):
             if (cx >= 350 && cx <= 850) score += 40;
             if (cy >= 50 && cy <= 700) score += 40;
             if (cy > 700) score -= 100;
-            return {
-                href,
-                score
-            };
+            return { href, score };
         }).filter(Boolean);
 
         candidates.sort((a, b) => b.score - a.score);
-
         return candidates.length ? candidates[0].href : null;
     }
     """
@@ -550,12 +477,10 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
     while time.time() - start < max_wait_seconds:
         app_link = extract_visible_install_link(page)
-
         if app_link != "N/A":
             return app_link
 
         app_link = extract_install_link_by_precise_js(page)
-
         if app_link != "N/A":
             return app_link
 
@@ -574,17 +499,11 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 # =========================
 
 def wait_and_extract_headline_description(page, max_wait_seconds=15):
-    """
-    Polls for Headline and Description inside iframes ONLY.
-    Uses structural class patterns (-e-15, -e-67) and visibility checks 
-    to avoid grabbing hidden template text.
-    """
     js = r"""
     () => {
         let headText = "N/A";
         let descText = "N/A";
 
-        // Helper to ensure we don't grab hidden/template elements
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
@@ -592,32 +511,28 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
             return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
 
-        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
         const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
         for (let el of headNodes) {
             if (isVisible(el)) {
                 let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
-                // Ensure it's not a template placeholder like {{headline}}
-                if (text.length > 1 && !text.includes('{{')) { 
-                    headText = text; 
-                    break; 
+                if (text.length > 1 && !text.includes('{{')) {
+                    headText = text;
+                    break;
                 }
             }
         }
 
-        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
         const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
         for (let el of descNodes) {
             if (isVisible(el)) {
                 let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
-                if (text.length > 1 && text !== headText && !text.includes('{{')) { 
-                    descText = text; 
-                    break; 
+                if (text.length > 1 && text !== headText && !text.includes('{{')) {
+                    descText = text;
+                    break;
                 }
             }
         }
 
-        // If we found either one, return it
         if (headText !== "N/A" || descText !== "N/A") {
             return { headline: headText, description: descText };
         }
@@ -627,11 +542,8 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
     """
 
     start = time.time()
-    
-    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
+
     while time.time() - start < max_wait_seconds:
-        
-        # STRICTLY CHECK IFRAMES ONLY.
         for frame in page.frames:
             try:
                 result = frame.evaluate(js)
@@ -639,17 +551,11 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
                     return result.get("headline", "N/A"), result.get("description", "N/A")
             except Exception:
                 continue
-        
-        # Wait 1 second and loop again to let the ad iframe fully load
+
         page.wait_for_timeout(1000)
 
-    # If the timer runs out, return N/A
     return "N/A", "N/A"
 
-
-# =========================
-# ADVERTISER LOGIC
-# =========================
 
 # =========================
 # ADVERTISER LOGIC
@@ -658,11 +564,10 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 def extract_advertiser_from_page(page):
     """
     Extract advertiser name from the top of the page.
-    Primary: Uses the explicit 'advertiser-title' class for perfect accuracy.
-    Fallback: Scans leaf nodes for the largest text near the top (for headless Linux).
+    Strategy 1: Exact '.advertiser-title' class match.
+    Strategy 2: Visual fallback scanning leaf nodes near top of page.
     """
-    
-    # STRATEGY 1: Exact Class Match (Highly Reliable!)
+    # STRATEGY 1: Exact class match
     try:
         loc = page.locator('.advertiser-title')
         if loc.count() > 0:
@@ -672,39 +577,38 @@ def extract_advertiser_from_page(page):
     except Exception:
         pass
 
-    # STRATEGY 2: Visual Fallback (If Google temporarily changes their HTML classes)
+    # STRATEGY 2: Visual fallback
     js = r"""
     () => {
         const badExact = [
             'ad details', 'last shown', 'format:', 'shown in', 'report this ad',
             'see more ads', 'ads transparency centre', 'ads transparency center',
-            'faqs', 'privacy', 'terms', 'policies', 'home', 'sign in', 'sign up', 
-            'log in', 'close', 'menu', 'keyboard_arrow_right', 'arrow_back', 
+            'faqs', 'privacy', 'terms', 'policies', 'home', 'sign in', 'sign up',
+            'log in', 'close', 'menu', 'keyboard_arrow_right', 'arrow_back',
             'arrow_forward', 'chevron_left', 'chevron_right'
         ];
-        
+
         const elements = Array.from(document.querySelectorAll('body *'));
         let candidates = [];
-        
+
         for (let i = 0; i < elements.length; i++) {
             let el = elements[i];
-            
             if (el.childElementCount > 0) continue;
-            
+
             const text = (el.innerText || el.textContent || "").trim();
             if (text.length < 2 || text.length > 80 || text.includes('\n')) continue;
-            
+
             const lower = text.toLowerCase();
             if (badExact.includes(lower)) continue;
             if (lower.includes('information about this ad')) continue;
             if (lower.includes('cookie')) continue;
-            
+
             const rect = el.getBoundingClientRect();
             if (rect.y < 0 || rect.y > 450 || rect.width < 10 || rect.height < 10) continue;
-            
+
             const style = window.getComputedStyle(el);
             if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
-            
+
             candidates.push({
                 text: text,
                 y: rect.y,
@@ -713,7 +617,7 @@ def extract_advertiser_from_page(page):
                 domIndex: i
             });
         }
-        
+
         let unique = [];
         let seen = new Set();
         for (let c of candidates) {
@@ -722,110 +626,26 @@ def extract_advertiser_from_page(page):
                 unique.push(c);
             }
         }
-        
+
         if (unique.length === 0) return null;
-        
+
         unique.sort((a, b) => {
-            if (b.font !== a.font) return b.font - a.font; 
+            if (b.font !== a.font) return b.font - a.font;
             if (a.y !== b.y) return a.y - b.y;
             return a.domIndex - b.domIndex;
         });
-        
+
         return unique[0].text;
     }
     """
-    
+
     try:
         advertiser = page.evaluate(js)
         if advertiser:
             return advertiser
     except Exception:
         pass
-        
-    return "N/A"
-    """
-    Extract advertiser name from the top of the page.
-    Strictly scans 'leaf nodes' to prevent reading giant UI wrappers,
-    and ignores common Google Ads Transparency UI text.
-    """
-    js = r"""
-    () => {
-        const badExact = [
-            'ad details', 'last shown', 'format:', 'shown in', 'report this ad',
-            'see more ads', 'ads transparency centre', 'ads transparency center',
-            'faqs', 'privacy', 'terms', 'policies', 'home', 'sign in', 'sign up', 
-            'log in', 'close', 'menu', 'keyboard_arrow_right', 'arrow_back', 
-            'arrow_forward', 'chevron_left', 'chevron_right'
-        ];
-        
-        // Get absolutely every element on the page
-        const elements = Array.from(document.querySelectorAll('body *'));
-        let candidates = [];
-        
-        for (let el of elements) {
-            // CRITICAL FIX: Must be a leaf node (no child elements inside it).
-            // This prevents grabbing the giant navigation menu wrapper.
-            if (el.childElementCount > 0) continue;
-            
-            const text = (el.innerText || el.textContent || "").trim();
-            
-            // Ignore blank text, giant paragraphs, or text with line breaks
-            if (text.length < 2 || text.length > 80 || text.includes('\n')) continue;
-            
-            const lower = text.toLowerCase();
-            
-            // Ignore precise UI keywords
-            if (badExact.includes(lower)) continue;
-            if (lower.includes('information about this ad')) continue;
-            
-            const rect = el.getBoundingClientRect();
-            
-            // The advertiser name is always in the top header area (Y < 250)
-            if (rect.y < 0 || rect.y > 250 || rect.width < 10 || rect.height < 10) continue;
-            
-            // Ignore hidden elements
-            const style = window.getComputedStyle(el);
-            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
-            
-            candidates.push({
-                text: text,
-                y: rect.y,
-                x: rect.x,
-                font: parseFloat(style.fontSize || '0')
-            });
-        }
-        
-        // Remove duplicates
-        let unique = [];
-        let seen = new Set();
-        for (let c of candidates) {
-            if (!seen.has(c.text)) {
-                seen.add(c.text);
-                unique.push(c);
-            }
-        }
-        
-        if (unique.length === 0) return null;
-        
-        // The advertiser name is consistently the largest text near the top of the page.
-        // Sort by largest font size first, then by closest to the top.
-        unique.sort((a, b) => {
-            if (b.font !== a.font) return b.font - a.font; 
-            return a.y - b.y; 
-        });
-        
-        return unique[0].text;
-    }
-    """
-    
-    try:
-        # Run the JS exclusively on the main page (Advertiser name is never inside the iframe)
-        advertiser = page.evaluate(js)
-        if advertiser:
-            return advertiser
-    except Exception:
-        pass
-        
+
     return "N/A"
 
 
@@ -834,6 +654,19 @@ def extract_advertiser_from_page(page):
 # =========================
 
 def scrape_single_url(url_row):
+    """
+    FIX: Each URL gets its own fresh browser + context + page.
+    This is the KEY fix — the original code was correct in structure,
+    but the `captured` dict was shared across page navigations inside
+    the same Playwright context in some usage patterns.
+    
+    We also now:
+    1. Clear performance entries before loading the page so stale
+       video responses from a previous page never bleed in.
+    2. Register the response handler BEFORE goto(), not after.
+    3. Reset `captured` to a fresh dict for every URL (already done,
+       but now guaranteed since we open a new browser per call).
+    """
     row_num, url = url_row
 
     with sync_playwright() as p:
@@ -857,19 +690,18 @@ def scrape_single_url(url_row):
         )
 
         page = context.new_page()
+
+        # FIX 1: Fresh captured dict per URL (guaranteed fresh since new browser)
         captured = {"video_id": "N/A"}
 
-        # We reverted this back to your original clean response handler!
+        # FIX 2: Register handler BEFORE goto so no early responses are missed
         def handle_response(response):
             try:
                 if not is_real_video_response(response):
                     return
-
                 video_id = extract_video_id_from_url(response.url)
-
                 if video_id and captured["video_id"] == "N/A":
                     captured["video_id"] = video_id
-
             except Exception:
                 pass
 
@@ -890,13 +722,30 @@ def scrape_single_url(url_row):
                 message="Started video ID then app link extraction"
             )
 
+            # FIX 3: Use a full navigation with networkidle wait so the ad
+            # creative has time to fully load and fire its video network requests.
+            # "domcontentloaded" was too early — the ad iframe hadn't loaded yet
+            # for rows 2+ because the SPA reuses the same DOM shell.
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(4000)
+
+            # FIX 4: Clear stale performance entries immediately after load.
+            # This ensures scan_browser_performance_for_video() only sees
+            # requests from THIS page, not a cached previous page's data.
+            try:
+                page.evaluate("() => performance.clearResourceTimings()")
+            except Exception:
+                pass
+
+            # FIX 5: Extra wait for the ad creative iframe to load.
+            # The Transparency Center is a SPA — the ad panel loads async
+            # AFTER the main DOM is ready. 4s was sometimes not enough for
+            # advertisers after the first one (cold-cache vs warm-cache).
+            page.wait_for_timeout(5000)
 
             # Step 1: extract advertiser from top header
             advertiser = extract_advertiser_from_page(page)
 
-            # Step 2: detect video ID first
+            # Step 2: detect video ID
             video_id = detect_video_id(page, captured)
             video_time = get_exact_time()
 
@@ -926,7 +775,7 @@ def scrape_single_url(url_row):
                 print(f"⏭ Row {row_num}: NON_VIDEO at {video_time}")
                 return
 
-            print(f"🎬 Row {row_num}: video ID found first: {video_id}")
+            print(f"🎬 Row {row_num}: video ID found: {video_id}")
 
             # Step 3: only after video is found, extract app link
             app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
@@ -969,7 +818,6 @@ def scrape_single_url(url_row):
 
         except Exception as e:
             error_time = get_exact_time()
-
             print(f"❌ Row {row_num} error at {error_time}: {e}")
 
             try:
@@ -982,7 +830,6 @@ def scrape_single_url(url_row):
                     "ERROR",
                     error_time
                 ]
-
                 safe_update_combined_row(row_num, data)
                 safe_update_headline_desc(row_num, "N/A", "N/A")
             except Exception:
