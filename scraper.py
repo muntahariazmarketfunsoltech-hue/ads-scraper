@@ -64,7 +64,7 @@ def clean_text(value):
 
 
 # =========================
-# PACKAGE EXTRACTION (TEXT ADS - from merge.py)
+# PACKAGE EXTRACTION (TEXT ADS)
 # =========================
 
 def decode_all(text):
@@ -135,6 +135,7 @@ def extract_package_from_page(page):
     """Scans strictly the rendered DOM and visible links."""
     collected_texts = []
 
+    # Scan all frames
     for frame in page.frames:
         try:
             frame_html = frame.evaluate("() => document.documentElement.outerHTML")
@@ -155,6 +156,7 @@ def extract_package_from_page(page):
         except Exception:
             continue
 
+    # Scan main frame
     try:
         visible = page.evaluate("() => document.body ? document.body.innerText : ''")
         if visible:
@@ -230,10 +232,11 @@ def extract_package_name_from_link(app_link):
 
 
 # =========================
-# VIDEO ID EXTRACTION (from scraper__1_.py)
+# VIDEO ID EXTRACTION
 # =========================
 
 def is_real_video_response(response):
+    """Check if a network response is a real video."""
     try:
         url = response.url.lower()
         headers = response.headers
@@ -405,31 +408,40 @@ def click_possible_video_targets(page):
 
 def detect_video_id(page, captured):
     """
-    MAIN VIDEO DETECTION (from scraper__1_.py)
-    Returns video_id if video found, "N/A" if text ad
+    MAIN VIDEO DETECTION - Returns video_id if found, "N/A" if text ad
+    Uses 4 methods to detect video:
+    1. Network response capture
+    2. DOM video elements
+    3. Performance API
+    4. Click and retry
     """
-    # 1. Check captured video response first
+    print(f"    🔍 Method 1: Checking network captures...")
     if captured.get("video_id") and captured["video_id"] != "N/A":
+        print(f"    ✅ FOUND via network response: {captured['video_id']}")
         return captured["video_id"]
 
-    # 2. Check DOM video elements
+    print(f"    🔍 Method 2: Checking DOM video elements...")
     video_id = extract_video_from_dom(page)
     if video_id != "N/A":
+        print(f"    ✅ FOUND in DOM: {video_id}")
         return video_id
 
-    # 3. Scan performance entries
+    print(f"    🔍 Method 3: Checking performance API...")
     video_id = scan_browser_performance_for_video(page)
     if video_id != "N/A":
+        print(f"    ✅ FOUND in performance API: {video_id}")
         return video_id
 
-    # 4. Try clicking video targets and retry
+    print(f"    🔍 Method 4: Clicking play buttons and retrying...")
     click_possible_video_targets(page)
     page.wait_for_timeout(2000)
 
     video_id = scan_browser_performance_for_video(page)
     if video_id != "N/A":
+        print(f"    ✅ FOUND after clicking: {video_id}")
         return video_id
 
+    print(f"    ❌ NO VIDEO FOUND - This is a TEXT AD")
     return "N/A"
 
 
@@ -489,11 +501,11 @@ def extract_advertiser_from_page(page):
 
 
 # =========================
-# TEXT AD EXTRACTION (from merge.py)
+# TEXT AD EXTRACTION
 # =========================
 
 def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
-    """Extracts headline and description from text ads (from merge.py)."""
+    """Extracts headline and description from text ads."""
     js = r"""
     () => {
         let result = { headline: "N/A", description: "N/A" };
@@ -555,6 +567,15 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
+        # Try main frame first
+        try:
+            data = page.evaluate(js)
+            if data["headline"] != "N/A":
+                return data
+        except Exception:
+            pass
+
+        # Try iframes
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
@@ -564,17 +585,18 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
                     return data
             except Exception:
                 continue
+        
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
 
 
 # =========================
-# INSTALL LINK EXTRACTION (VIDEO ADS - from scraper__1_.py)
+# INSTALL LINK EXTRACTION
 # =========================
 
 def wait_and_extract_install_link(page, max_wait_seconds=35):
-    """Extracts install link from page with extensive waiting (from scraper__1_.py)."""
+    """Extracts install link from page with extensive waiting."""
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
@@ -612,18 +634,19 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
-# MAIN SCRAPER - UNIFIED LOGIC
+# MAIN SCRAPER - UNIFIED LOGIC (FIXED)
 # =========================
 
 def scrape_single_url(url_row):
     """
-    UNIFIED SCRAPER WITH CLEAR VIDEO/TEXT DISTINCTION
+    UNIFIED SCRAPER WITH PROPER VIDEO/TEXT DISTINCTION
     
-    DECISION LOGIC:
-    1. Try to detect VIDEO ID (using scraper__1_.py logic)
-    2. IF video_id found → USE scraper__1_.py LOGIC
-    3. IF no video (N/A) → USE merge.py LOGIC
-    4. Save video_id or "TEXT_AD" in column F
+    FIXED LOGIC:
+    1. Try to detect VIDEO ID using 4 methods
+    2. IF video found → Extract install link, get package from link
+    3. IF no video (N/A) → Extract packages from page, match to headline
+    4. Save actual video_id OR "TEXT_AD" in column F
+    5. ALWAYS extract and save headline & description
     """
     row_num, url = url_row
 
@@ -650,7 +673,10 @@ def scrape_single_url(url_row):
         page = context.new_page()
         captured = {"video_id": "N/A"}
 
-        # RESPONSE HANDLER FOR VIDEO DETECTION (from scraper__1_.py)
+        # ═══════════════════════════════════════════════════════════════
+        # RESPONSE HANDLER FOR VIDEO DETECTION
+        # ═══════════════════════════════════════════════════════════════
+
         def handle_response(response):
             try:
                 if not is_real_video_response(response):
@@ -660,6 +686,7 @@ def scrape_single_url(url_row):
 
                 if video_id and captured["video_id"] == "N/A":
                     captured["video_id"] = video_id
+                    print(f"    📡 VIDEO CAPTURED FROM NETWORK: {video_id}")
 
             except Exception:
                 pass
@@ -667,6 +694,7 @@ def scrape_single_url(url_row):
         page.on("response", handle_response)
 
         try:
+            # Add region parameter if missing
             if "region=" not in url:
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
@@ -683,6 +711,7 @@ def scrape_single_url(url_row):
                 message="Started scraping"
             )
 
+            # Load page
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
@@ -690,26 +719,32 @@ def scrape_single_url(url_row):
             advertiser = extract_advertiser_from_page(page)
             print(f"🏷️  Advertiser: {advertiser}")
 
-            # Step 2: DETECT VIDEO ID (decides which path to take)
+            # Step 2: DETECT VIDEO ID (THE KEY DECISION POINT)
             print(f"🎬 Attempting to detect VIDEO...")
+            print(f"    Testing 4 different detection methods...")
             video_id = detect_video_id(page, captured)
             
             # ═══════════════════════════════════════════════════════════════
+            # DECISION: VIDEO OR TEXT AD?
+            # ═══════════════════════════════════════════════════════════════
+            
             if video_id != "N/A":
                 # ╔═══════════════════════════════════════════════════════════╗
-                # ║           VIDEO AD - USE scraper__1_.py LOGIC            ║
+                # ║                   VIDEO AD DETECTED                       ║
                 # ╚═══════════════════════════════════════════════════════════╝
                 
-                print(f"✅ VIDEO AD DETECTED - Video ID: {video_id}")
+                print(f"✅ VIDEO AD DETECTED")
+                print(f"   Video ID: {video_id}")
                 video_time = get_exact_time()
 
-                # Extract install link
-                print(f"   📦 Extracting install link...")
+                # Extract install link (for video ads)
+                print(f"   📦 Extracting install link from page...")
                 app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
                 
                 if app_link != "N/A":
-                    print(f"   ✅ Install link found")
+                    print(f"   ✅ Install link found: {app_link[:60]}...")
                     package_name = extract_package_name_from_link(app_link)
+                    print(f"   ✅ Package extracted: {package_name}")
                 else:
                     print(f"   ⚠️  Install link NOT found")
                     app_link = "N/A"
@@ -718,33 +753,41 @@ def scrape_single_url(url_row):
                 # Extract headline and description
                 print(f"   📝 Extracting headline & description...")
                 headline, description = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
+                if headline != "N/A":
+                    print(f"   ✅ Headline: {headline[:50]}...")
+                if description != "N/A":
+                    print(f"   ✅ Description: {description[:50]}...")
 
+                # ═══════════════════════════════════════════════════════════
+                # SAVE VIDEO AD DATA
+                # ═══════════════════════════════════════════════════════════
+                
                 data = [
                     advertiser,
                     package_name,
                     url,
                     app_link,
                     video_time,
-                    video_id,  # ← ACTUAL VIDEO ID
+                    video_id,              # ← ACTUAL VIDEO ID (NOT "TEXT_AD")
                     video_time
                 ]
 
-                status = "SUCCESS" if app_link != "N/A" else "VIDEO_FOUND_NO_INSTALL_LINK"
-                log_msg = f"VIDEO_AD | Video: {video_id} | Package: {package_name}"
+                status = "SUCCESS" if app_link != "N/A" else "VIDEO_FOUND_NO_INSTALL"
+                log_msg = f"VIDEO_AD | Video ID: {video_id} | Package: {package_name}"
 
             else:
                 # ╔═══════════════════════════════════════════════════════════╗
-                # ║           TEXT AD - USE merge.py LOGIC                   ║
+                # ║                   TEXT AD DETECTED                        ║
                 # ╚═══════════════════════════════════════════════════════════╝
                 
-                print(f"📄 TEXT AD (no video detected)")
+                print(f"📄 TEXT AD DETECTED (no video found)")
                 text_time = get_exact_time()
 
                 # Extract headline and description
                 print(f"   📝 Extracting text ad headline & description...")
                 text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-                headline = text_data["headline"]
-                description = text_data["description"]
+                headline = text_data.get("headline", "N/A")
+                description = text_data.get("description", "N/A")
 
                 if headline == "N/A" or len(headline) < 3:
                     print(f"   ⚠️  NO VALID TEXT AD HEADLINE FOUND - SKIPPING")
@@ -755,42 +798,56 @@ def scrape_single_url(url_row):
                         url=url,
                         message="Text ad headline not found"
                     )
+                    print(f"✅ Row {row_num}: SKIPPED (no valid headline)")
+                    print(f"{'='*80}\n")
                     return
 
-                print(f"   ✅ Headline: {headline[:40]}...")
+                print(f"   ✅ Headline: {headline[:50]}...")
+                if description != "N/A":
+                    print(f"   ✅ Description: {description[:50]}...")
 
-                # Find packages and match
+                # Find packages and match to headline
                 print(f"   📦 Extracting packages from page...")
                 all_packages = extract_package_from_page(page)
-                print(f"   📦 Found {len(all_packages)} package(s)")
+                print(f"   📦 Found {len(all_packages)} package candidate(s)")
+                
+                if all_packages:
+                    for pkg in list(all_packages)[:3]:
+                        print(f"      - {pkg}")
                 
                 package_name = get_best_matching_package(headline, advertiser, all_packages)
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
-                    print(f"   ✅ Package matched: {package_name}")
+                    print(f"   ✅ Package matched (90% threshold): {package_name}")
+                    status = "SUCCESS"
                 else:
                     app_link = "N/A"
                     package_name = "NOT FOUND"
-                    print(f"   ⚠️  No package match found (90% threshold)")
+                    print(f"   ⚠️  No package match found at 90% threshold")
+                    status = "TEXT_AD_NO_MATCH"
 
+                # ═══════════════════════════════════════════════════════════
+                # SAVE TEXT AD DATA
+                # ═══════════════════════════════════════════════════════════
+                
                 data = [
                     advertiser,
                     package_name,
                     url,
                     app_link,
                     text_time,
-                    "TEXT_AD",  # ← SHOW "TEXT_AD" IN VIDEO ID COLUMN
+                    "TEXT_AD",              # ← SHOW "TEXT_AD" (NOT A VIDEO ID)
                     text_time
                 ]
 
-                status = "SUCCESS" if package_name != "NOT FOUND" else "TEXT_AD_NO_MATCH"
-                log_msg = f"TEXT_AD | Package: {package_name} | Headline: {headline[:30]}"
+                log_msg = f"TEXT_AD | Package: {package_name} | Headline: {headline[:40]}"
 
             # ═══════════════════════════════════════════════════════════════
             # SAVE RESULTS (BOTH VIDEO AND TEXT ADS)
             # ═══════════════════════════════════════════════════════════════
             
+            print(f"   💾 Saving to Google Sheet...")
             safe_update_combined_row(row_num, data)
             safe_update_headline_desc(row_num, headline, description)
 
@@ -809,8 +866,9 @@ def scrape_single_url(url_row):
 
         except Exception as e:
             error_time = get_exact_time()
+            error_msg = str(e)[:150]
 
-            print(f"❌ Row {row_num} ERROR: {str(e)[:100]}")
+            print(f"❌ Row {row_num} ERROR: {error_msg}")
             print(f"{'='*80}\n")
 
             try:
@@ -826,7 +884,7 @@ def scrape_single_url(url_row):
                     status="ERROR",
                     log_type="SCRAPING",
                     url=url,
-                    message=str(e)[:100]
+                    message=error_msg
                 )
             except Exception:
                 pass
@@ -837,7 +895,7 @@ def scrape_single_url(url_row):
             browser.close()
 
 
-def run_parallel_scraper(max_workers=2):
+def run_parallel_scraper(max_workers=MAX_WORKERS):
     """Run the unified scraper in parallel."""
     urls = sheets.get_urls_with_retry()
 
@@ -852,7 +910,7 @@ def run_parallel_scraper(max_workers=2):
         return
 
     print(f"\n{'='*80}")
-    print(f"🚀 UNIFIED VIDEO + TEXT AD SCRAPER")
+    print(f"🚀 UNIFIED VIDEO + TEXT AD SCRAPER (FIXED)")
     print(f"   Total URLs to scrape: {len(url_rows)}")
     print(f"   Max workers: {max_workers}")
     print(f"{'='*80}\n")
