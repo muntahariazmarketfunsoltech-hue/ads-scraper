@@ -8,6 +8,7 @@ import time
 import threading
 import sheets
 
+
 MAX_WORKERS = 2
 SHEET_LOCK = threading.Lock()
 
@@ -34,7 +35,7 @@ def safe_update_combined_row(row_num, data):
 
 
 def safe_update_headline_desc(row_num, headline, description):
-    """Thread-safe Google Sheet row update for Headline and Description."""
+    """Thread-safe Google Sheet row update."""
     with SHEET_LOCK:
         sheets.update_headline_and_description(row_num, headline, description)
 
@@ -68,7 +69,7 @@ def clean_text(value):
 # =========================
 
 def decode_all(text):
-    """Decode every encoding variant so no package name is missed."""
+    """Decode every encoding variant."""
     text = re.sub(r'\\x3[Dd]', '=', text)
     text = re.sub(r'\\x26',    '&', text)
     text = re.sub(r'\\x3[Ff]', '?', text)
@@ -109,7 +110,7 @@ def _is_valid_pkg(pkg):
 
 
 def extract_packages_from_text(raw_text):
-    """Returns a SET of all unique, valid package names found in the text."""
+    """Returns a SET of all unique, valid package names."""
     text = decode_all(raw_text)
     candidates = set()   
 
@@ -132,10 +133,9 @@ def extract_packages_from_text(raw_text):
 
 
 def extract_package_from_page(page):
-    """Scans strictly the rendered DOM and visible links."""
+    """Scans the DOM and visible links for packages."""
     collected_texts = []
 
-    # Scan all frames
     for frame in page.frames:
         try:
             frame_html = frame.evaluate("() => document.documentElement.outerHTML")
@@ -156,7 +156,6 @@ def extract_package_from_page(page):
         except Exception:
             continue
 
-    # Scan main frame
     try:
         visible = page.evaluate("() => document.body ? document.body.innerText : ''")
         if visible:
@@ -180,16 +179,13 @@ def extract_package_from_page(page):
 
 
 def clean_text_for_comparison(text):
-    """Strips spaces, punctuation, and makes text lowercase for comparison."""
+    """Strips spaces and punctuation for comparison."""
     if not text or text == "N/A": return ""
     return re.sub(r'[^a-z0-9]', '', str(text).lower())
 
 
 def get_best_matching_package(headline, advertiser, package_list):
-    """
-    Compares visible headline/advertiser against package names.
-    Returns the one with highest similarity score (90% threshold).
-    """
+    """Match headline to package with 90% threshold."""
     if not package_list: 
         return None
     
@@ -214,8 +210,8 @@ def get_best_matching_package(headline, advertiser, package_list):
     return best_pkg if highest_ratio >= THRESHOLD else None
 
 
-def extract_package_name_from_link(app_link):
-    """Extracts package name from Google Play Store link."""
+def extract_package_name(app_link):
+    """Extract package from app link."""
     if not app_link or app_link == "N/A":
         return "N/A"
     
@@ -226,17 +222,23 @@ def extract_package_name_from_link(app_link):
             package_name = query.get("id", [None])[0]
             if package_name:
                 return package_name
+        
+        if "apps.apple.com" in app_link.lower():
+            match = re.search(r"/id(\d+)", app_link)
+            if match:
+                return f"id{match.group(1)}"
+        
         return "N/A"
+    
     except Exception:
         return "N/A"
 
 
 # =========================
-# VIDEO ID EXTRACTION
+# VIDEO ID EXTRACTION (ORIGINAL LOGIC)
 # =========================
 
 def is_real_video_response(response):
-    """Check if a network response is a real video."""
     try:
         url = response.url.lower()
         headers = response.headers
@@ -264,7 +266,7 @@ def is_real_video_response(response):
 
 
 def extract_video_id_from_url(req_url):
-    """Extracts clean video IDs or filenames from URLs."""
+    """Extracts clean video IDs from URLs."""
     try:
         url_lower = req_url.lower()
         parsed = urlparse(req_url)
@@ -307,7 +309,7 @@ def extract_video_id_from_url(req_url):
 
 
 def extract_video_from_dom(page):
-    """Checks actual video elements on page and inside frames."""
+    """Check for video elements in DOM."""
     try:
         video_sources = page.evaluate("""
             () => Array.from(document.querySelectorAll('video'))
@@ -343,7 +345,7 @@ def extract_video_from_dom(page):
 
 
 def scan_browser_performance_for_video(page):
-    """Scans performance entries for real video URLs only."""
+    """Scan performance entries for videos."""
     try:
         urls = page.evaluate("""
             () => performance.getEntriesByType('resource').map(r => r.name)
@@ -375,7 +377,7 @@ def scan_browser_performance_for_video(page):
 
 
 def click_possible_video_targets(page):
-    """Clicks possible video preview areas."""
+    """Click video play buttons with bounding box checks."""
     selectors = [
         "video",
         "iframe",
@@ -398,59 +400,422 @@ def click_possible_video_targets(page):
                     continue
 
                 try:
-                    el.click(timeout=1000)
+                    el.scroll_into_view_if_needed(timeout=2000)
+                    box = el.bounding_box()
+
+                    if not box:
+                        continue
+
+                    if box["width"] < 120 or box["height"] < 80:
+                        continue
+
+                    x = box["x"] + box["width"] / 2
+                    y = box["y"] + box["height"] / 2
+
+                    page.mouse.click(x, y)
+                    page.wait_for_timeout(1500)
+                    return True
+
                 except Exception:
-                    pass
+                    continue
 
         except Exception:
             continue
 
+    return False
+
+
+def wait_for_video_id(page, captured, max_seconds=20):
+    """ORIGINAL: Poll for video ID over time."""
+    waited = 0
+
+    while waited < max_seconds:
+        if captured.get("video_id") and captured["video_id"] != "N/A":
+            return captured["video_id"]
+
+        dom_video_id = extract_video_from_dom(page)
+        if dom_video_id != "N/A":
+            return dom_video_id
+
+        page.wait_for_timeout(500)
+        waited += 0.5
+
+    return "N/A"
+
 
 def detect_video_id(page, captured):
     """
-    MAIN VIDEO DETECTION - Returns video_id if found, "N/A" if text ad
-    Uses 4 methods to detect video:
-    1. Network response capture
-    2. DOM video elements
-    3. Performance API
-    4. Click and retry
+    ORIGINAL DETECTION LOGIC: 
+    1. Check DOM for video
+    2. Click and wait
+    3. Check performance API
+    4. Scroll and retry
     """
-    print(f"    🔍 Method 1: Checking network captures...")
-    if captured.get("video_id") and captured["video_id"] != "N/A":
-        print(f"    ✅ FOUND via network response: {captured['video_id']}")
-        return captured["video_id"]
-
-    print(f"    🔍 Method 2: Checking DOM video elements...")
     video_id = extract_video_from_dom(page)
-    if video_id != "N/A":
-        print(f"    ✅ FOUND in DOM: {video_id}")
-        return video_id
 
-    print(f"    🔍 Method 3: Checking performance API...")
-    video_id = scan_browser_performance_for_video(page)
-    if video_id != "N/A":
-        print(f"    ✅ FOUND in performance API: {video_id}")
-        return video_id
+    if video_id == "N/A":
+        click_possible_video_targets(page)
+        video_id = wait_for_video_id(page, captured, max_seconds=15)
 
-    print(f"    🔍 Method 4: Clicking play buttons and retrying...")
-    click_possible_video_targets(page)
-    page.wait_for_timeout(2000)
+    if video_id == "N/A":
+        video_id = scan_browser_performance_for_video(page)
 
-    video_id = scan_browser_performance_for_video(page)
-    if video_id != "N/A":
-        print(f"    ✅ FOUND after clicking: {video_id}")
-        return video_id
+    if video_id == "N/A":
+        page.mouse.wheel(0, 400)  # ← SCROLL - IMPORTANT!
+        page.wait_for_timeout(1500)
 
-    print(f"    ❌ NO VIDEO FOUND - This is a TEXT AD")
+        click_possible_video_targets(page)
+        video_id = wait_for_video_id(page, captured, max_seconds=10)
+
+    return video_id
+
+
+# =========================
+# APP LINK EXTRACTION (ORIGINAL LOGIC)
+# =========================
+
+def clean_googleadservices_link(href):
+    if not href:
+        return "N/A"
+
+    href = href.strip()
+
+    if href.startswith("//"):
+        href = "https:" + href
+
+    try:
+        parsed = urlparse(href)
+        query = parse_qs(parsed.query)
+
+        possible_keys = [
+            "adurl",
+            "url",
+            "q",
+            "u",
+            "ds_dest_url",
+            "destination",
+        ]
+
+        for key in possible_keys:
+            value = query.get(key, [None])[0]
+            if value:
+                return unquote(value)
+
+    except Exception:
+        pass
+
+    return href
+
+
+def is_good_app_link(href):
+    if not href:
+        return False
+
+    href = href.lower()
+
+    return (
+        "googleadservices.com/pagead/aclk" in href
+        or "play.google.com" in href
+        or "apps.apple.com" in href
+        or "itunes.apple.com" in href
+    )
+
+
+def get_visible_install_candidates_from_target(target):
+    """ORIGINAL: Score install button candidates."""
+    candidates = []
+
+    for selector in INSTALL_SELECTORS:
+        try:
+            loc = target.locator(selector)
+            count = loc.count()
+
+            for i in range(count):
+                try:
+                    el = loc.nth(i)
+
+                    href = el.get_attribute("href", timeout=1500)
+                    data_href = el.get_attribute("data-href", timeout=1000)
+
+                    final_href = href or data_href
+
+                    if not final_href or not is_good_app_link(final_href):
+                        continue
+
+                    box = el.bounding_box(timeout=1500)
+
+                    if not box:
+                        continue
+
+                    if box["width"] < 20 or box["height"] < 10:
+                        continue
+
+                    text = ""
+                    try:
+                        text = el.inner_text(timeout=1000).strip().lower()
+                    except Exception:
+                        pass
+
+                    score = 0
+
+                    try:
+                        class_name = el.get_attribute("class", timeout=1000) or ""
+                        if "install-button-anchor" in class_name:
+                            score += 100
+                    except Exception:
+                        pass
+
+                    if "install" in text:
+                        score += 80
+                    elif "get" in text or "download" in text:
+                        score += 40
+
+                    center_x = box["x"] + box["width"] / 2
+                    center_y = box["y"] + box["height"] / 2
+
+                    if 350 <= center_x <= 850:
+                        score += 40
+
+                    if 50 <= center_y <= 700:
+                        score += 40
+
+                    if center_y > 700:
+                        score -= 100
+
+                    candidates.append({
+                        "href": final_href,
+                        "score": score,
+                        "box": box,
+                        "text": text,
+                    })
+
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    return candidates
+
+
+def extract_visible_install_link(page):
+    """ORIGINAL: Extract visible install button."""
+    all_candidates = []
+
+    try:
+        all_candidates.extend(get_visible_install_candidates_from_target(page))
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            all_candidates.extend(get_visible_install_candidates_from_target(frame))
+        except Exception:
+            continue
+
+    if not all_candidates:
+        return "N/A"
+
+    all_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    best = all_candidates[0]
+
+    if best["score"] <= 0:
+        return "N/A"
+
+    return clean_googleadservices_link(best["href"])
+
+
+def extract_install_link_by_precise_js(page):
+    """ORIGINAL: Precise JS fallback."""
+    js = r"""
+    () => {
+        const anchors = Array.from(document.querySelectorAll('a[href], a[data-href]'));
+        const candidates = anchors.map(a => {
+            const href = a.href || a.getAttribute('href') || a.getAttribute('data-href') || '';
+            const text = (a.innerText || a.textContent || '').trim().toLowerCase();
+            const cls = String(a.className || '').toLowerCase();
+            const aria = String(a.getAttribute('aria-label') || '').toLowerCase();
+            const rect = a.getBoundingClientRect();
+
+            const goodLink =
+                href.includes('googleadservices.com/pagead/aclk') ||
+                href.includes('play.google.com') ||
+                href.includes('apps.apple.com') ||
+                href.includes('itunes.apple.com');
+
+            const looksInstall =
+                cls.includes('install-button-anchor') ||
+                text.includes('install') ||
+                text.includes('get') ||
+                text.includes('download') ||
+                aria.includes('install');
+
+            const visible =
+                rect.width > 20 &&
+                rect.height > 10 &&
+                rect.bottom > 0 &&
+                rect.right > 0 &&
+                rect.top < window.innerHeight &&
+                rect.left < window.innerWidth;
+
+            if (!goodLink || !looksInstall || !visible) {
+                return null;
+            }
+
+            let score = 0;
+            if (cls.includes('install-button-anchor')) score += 100;
+            if (text.includes('install')) score += 80;
+            if (text.includes('get') || text.includes('download')) score += 40;
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            if (cx >= 350 && cx <= 850) score += 40;
+            if (cy >= 50 && cy <= 700) score += 40;
+            if (cy > 700) score -= 100;
+            return {
+                href,
+                score
+            };
+        }).filter(Boolean);
+
+        candidates.sort((a, b) => b.score - a.score);
+
+        return candidates.length ? candidates[0].href : null;
+    }
+    """
+
+    try:
+        href = page.evaluate(js)
+        if href and is_good_app_link(href):
+            return clean_googleadservices_link(href)
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            href = frame.evaluate(js)
+            if href and is_good_app_link(href):
+                return clean_googleadservices_link(href)
+        except Exception:
+            continue
+
+    return "N/A"
+
+
+def wait_and_extract_install_link(page, max_wait_seconds=35):
+    """ORIGINAL: Wait and extract with retries."""
+    start = time.time()
+
+    while time.time() - start < max_wait_seconds:
+        app_link = extract_visible_install_link(page)
+
+        if app_link != "N/A":
+            return app_link
+
+        app_link = extract_install_link_by_precise_js(page)
+
+        if app_link != "N/A":
+            return app_link
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(1500)
+
     return "N/A"
 
 
 # =========================
-# ADVERTISER EXTRACTION
+# TEXT AD EXTRACTION
 # =========================
 
+def wait_and_extract_headline_description(page, max_wait_seconds=15):
+    """Extract headline and description."""
+    js = r"""
+    () => {
+        let result = { headline: "N/A", description: "N/A" };
+        const isBadText = (txt) => {
+            const lower = txt.toLowerCase();
+            const exactBlock = ['install', 'download', 'get', 'open', 'visit site', 'learn more', 'sign in', 'google', 'search', 'ad details', 'ads transparency'];
+            if (exactBlock.includes(lower)) return true;
+            if (lower.length < 15 && (lower.startsWith('install') || lower.startsWith('download') || lower.startsWith('get '))) return true;
+            return false;
+        };
+        
+        let maxFont = 0;
+        let bestEl = null;
+        for (let el of document.querySelectorAll('*')) {
+            if (el.childElementCount > 0) continue;
+            let txt = (el.innerText || "").trim();
+            if (txt.length < 4 || isBadText(txt)) continue;
+            
+            let rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+
+            let style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+            
+            let fontSize = parseFloat(style.fontSize || '0');
+            if (fontSize > maxFont) {
+                maxFont = fontSize;
+                bestEl = el;
+            }
+        }
+
+        if (bestEl) {
+            result.headline = bestEl.innerText.replace(/\n/g, ' ').trim();
+            
+            let maxLen = 0;
+            for (let el of document.querySelectorAll('*')) {
+                if (el.childElementCount > 0) continue;
+                let txt = (el.innerText || "").replace(/\n/g, ' ').trim();
+                if (txt === result.headline || txt.length < 15 || isBadText(txt)) continue;
+                
+                let rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+
+                let style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                
+                if (txt.length > maxLen) {
+                    maxLen = txt.length;
+                    result.description = txt;
+                }
+            }
+        }
+        return result;
+    }
+    """
+
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_seconds:
+        try:
+            data = page.evaluate(js)
+            if data["headline"] != "N/A":
+                return data["headline"], data["description"]
+        except Exception:
+            pass
+
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                data = frame.evaluate(js)
+                if data["headline"] != "N/A":
+                    return data["headline"], data["description"]
+            except Exception:
+                continue
+        
+        page.wait_for_timeout(1000)
+
+    return "N/A", "N/A"
+
+
 def extract_advertiser_from_page(page):
-    """Extracts advertiser name from page."""
+    """Extract advertiser from page header."""
     try:
         loc = page.locator('.advertiser-title, [data-test-id="advertiser-name"]').first
         loc.wait_for(timeout=4000)
@@ -501,152 +866,17 @@ def extract_advertiser_from_page(page):
 
 
 # =========================
-# TEXT AD EXTRACTION
-# =========================
-
-def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
-    """Extracts headline and description from text ads."""
-    js = r"""
-    () => {
-        let result = { headline: "N/A", description: "N/A" };
-        const isBadText = (txt) => {
-            const lower = txt.toLowerCase();
-            const exactBlock = ['install', 'download', 'get', 'open', 'visit site', 'learn more', 'sign in', 'google', 'search', 'ad details', 'ads transparency'];
-            if (exactBlock.includes(lower)) return true;
-            if (lower.length < 15 && (lower.startsWith('install') || lower.startsWith('download') || lower.startsWith('get '))) return true;
-            return false;
-        };
-        
-        // 1. EXTRACT HEADLINE
-        let maxFont = 0;
-        let bestEl = null;
-        for (let el of document.querySelectorAll('*')) {
-            if (el.childElementCount > 0) continue;
-            let txt = (el.innerText || "").trim();
-            if (txt.length < 4 || isBadText(txt)) continue;
-            
-            let rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-
-            let style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
-            
-            let fontSize = parseFloat(style.fontSize || '0');
-            if (fontSize > maxFont) {
-                maxFont = fontSize;
-                bestEl = el;
-            }
-        }
-
-        if (bestEl) {
-            result.headline = bestEl.innerText.replace(/\n/g, ' ').trim();
-            
-            // 2. EXTRACT DESCRIPTION
-            let maxLen = 0;
-            for (let el of document.querySelectorAll('*')) {
-                if (el.childElementCount > 0) continue;
-                let txt = (el.innerText || "").replace(/\n/g, ' ').trim();
-                if (txt === result.headline || txt.length < 15 || isBadText(txt)) continue;
-                
-                let rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-
-                let style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-                
-                if (txt.length > maxLen) {
-                    maxLen = txt.length;
-                    result.description = txt;
-                }
-            }
-        }
-        return result;
-    }
-    """
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-        # Try main frame first
-        try:
-            data = page.evaluate(js)
-            if data["headline"] != "N/A":
-                return data
-        except Exception:
-            pass
-
-        # Try iframes
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                data = frame.evaluate(js)
-                if data["headline"] != "N/A":
-                    return data
-            except Exception:
-                continue
-        
-        page.wait_for_timeout(1000)
-
-    return {"headline": "N/A", "description": "N/A"}
-
-
-# =========================
-# INSTALL LINK EXTRACTION
-# =========================
-
-def wait_and_extract_install_link(page, max_wait_seconds=35):
-    """Extracts install link from page with extensive waiting."""
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-        for sel in INSTALL_SELECTORS:
-            try:
-                elements = page.locator(sel)
-                if not elements:
-                    continue
-
-                count = elements.count()
-                for i in range(count):
-                    el = elements.nth(i)
-
-                    if not el.is_visible(timeout=500):
-                        continue
-
-                    href = el.get_attribute("href")
-                    if not href:
-                        continue
-
-                    href = href.strip()
-
-                    if "play.google.com" not in href.lower() and "apps.apple.com" not in href.lower():
-                        continue
-
-                    if href != "N/A":
-                        return href
-
-            except Exception:
-                continue
-
-        page.wait_for_timeout(1000)
-
-    return "N/A"
-
-
-# =========================
-# MAIN SCRAPER - UNIFIED LOGIC (FIXED)
+# MAIN SCRAPER - PROPERLY UNIFIED
 # =========================
 
 def scrape_single_url(url_row):
     """
-    UNIFIED SCRAPER WITH PROPER VIDEO/TEXT DISTINCTION
+    UNIFIED SCRAPER (Fixed - Using Original Logic)
     
-    FIXED LOGIC:
-    1. Try to detect VIDEO ID using 4 methods
-    2. IF video found → Extract install link, get package from link
-    3. IF no video (N/A) → Extract packages from page, match to headline
-    4. Save actual video_id OR "TEXT_AD" in column F
-    5. ALWAYS extract and save headline & description
+    1. Try to detect VIDEO using original logic (with scrolling!)
+    2. IF video found → extract app link using original logic
+    3. IF no video → extract text ad using text extraction
+    4. Save appropriate data to sheet
     """
     row_num, url = url_row
 
@@ -673,10 +903,7 @@ def scrape_single_url(url_row):
         page = context.new_page()
         captured = {"video_id": "N/A"}
 
-        # ═══════════════════════════════════════════════════════════════
-        # RESPONSE HANDLER FOR VIDEO DETECTION
-        # ═══════════════════════════════════════════════════════════════
-
+        # Network response handler for video capture
         def handle_response(response):
             try:
                 if not is_real_video_response(response):
@@ -686,7 +913,6 @@ def scrape_single_url(url_row):
 
                 if video_id and captured["video_id"] == "N/A":
                     captured["video_id"] = video_id
-                    print(f"    📡 VIDEO CAPTURED FROM NETWORK: {video_id}")
 
             except Exception:
                 pass
@@ -694,185 +920,149 @@ def scrape_single_url(url_row):
         page.on("response", handle_response)
 
         try:
-            # Add region parameter if missing
             if "region=" not in url:
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
-            print(f"\n{'='*80}")
-            print(f"🔍 Row {row_num}: Opening URL")
-            print(f"   {url}")
+            print(f"🔍 Row {row_num}: opening transparency URL")
 
             safe_add_log(
                 row_number=row_num,
                 status="STARTED",
-                log_type="SCRAPING",
+                log_type="COMBINED",
                 url=url,
                 message="Started scraping"
             )
 
-            # Load page
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
-            # Step 1: Extract advertiser (common to both)
+            # Step 1: Extract advertiser
             advertiser = extract_advertiser_from_page(page)
-            print(f"🏷️  Advertiser: {advertiser}")
 
-            # Step 2: DETECT VIDEO ID (THE KEY DECISION POINT)
-            print(f"🎬 Attempting to detect VIDEO...")
-            print(f"    Testing 4 different detection methods...")
+            # Step 2: Detect video using ORIGINAL logic
+            print(f"🎬 Row {row_num}: detecting video...")
             video_id = detect_video_id(page, captured)
-            
-            # ═══════════════════════════════════════════════════════════════
-            # DECISION: VIDEO OR TEXT AD?
-            # ═══════════════════════════════════════════════════════════════
-            
-            if video_id != "N/A":
-                # ╔═══════════════════════════════════════════════════════════╗
-                # ║                   VIDEO AD DETECTED                       ║
-                # ╚═══════════════════════════════════════════════════════════╝
+            video_time = get_exact_time()
+
+            if video_id == "N/A":
+                # ════════════════════════════════════════════════════════════
+                # TEXT AD PATH - No video detected
+                # ════════════════════════════════════════════════════════════
                 
-                print(f"✅ VIDEO AD DETECTED")
-                print(f"   Video ID: {video_id}")
-                video_time = get_exact_time()
-
-                # Extract install link (for video ads)
-                print(f"   📦 Extracting install link from page...")
-                app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
-                
-                if app_link != "N/A":
-                    print(f"   ✅ Install link found: {app_link[:60]}...")
-                    package_name = extract_package_name_from_link(app_link)
-                    print(f"   ✅ Package extracted: {package_name}")
-                else:
-                    print(f"   ⚠️  Install link NOT found")
-                    app_link = "N/A"
-                    package_name = "N/A"
-
-                # Extract headline and description
-                print(f"   📝 Extracting headline & description...")
-                headline, description = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-                if headline != "N/A":
-                    print(f"   ✅ Headline: {headline[:50]}...")
-                if description != "N/A":
-                    print(f"   ✅ Description: {description[:50]}...")
-
-                # ═══════════════════════════════════════════════════════════
-                # SAVE VIDEO AD DATA
-                # ═══════════════════════════════════════════════════════════
-                
-                data = [
-                    advertiser,
-                    package_name,
-                    url,
-                    app_link,
-                    video_time,
-                    video_id,              # ← ACTUAL VIDEO ID (NOT "TEXT_AD")
-                    video_time
-                ]
-
-                status = "SUCCESS" if app_link != "N/A" else "VIDEO_FOUND_NO_INSTALL"
-                log_msg = f"VIDEO_AD | Video ID: {video_id} | Package: {package_name}"
-
-            else:
-                # ╔═══════════════════════════════════════════════════════════╗
-                # ║                   TEXT AD DETECTED                        ║
-                # ╚═══════════════════════════════════════════════════════════╝
-                
-                print(f"📄 TEXT AD DETECTED (no video found)")
+                print(f"📄 Row {row_num}: TEXT AD (no video)")
                 text_time = get_exact_time()
 
                 # Extract headline and description
-                print(f"   📝 Extracting text ad headline & description...")
-                text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-                headline = text_data.get("headline", "N/A")
-                description = text_data.get("description", "N/A")
+                headline, description = wait_and_extract_headline_description(page, max_wait_seconds=15)
 
                 if headline == "N/A" or len(headline) < 3:
-                    print(f"   ⚠️  NO VALID TEXT AD HEADLINE FOUND - SKIPPING")
+                    print(f"⏭ Row {row_num}: NO VALID TEXT AD HEADLINE - SKIP")
+                    
                     safe_add_log(
                         row_number=row_num,
                         status="NO_VALID_TEXT",
-                        log_type="SCRAPING",
+                        log_type="COMBINED",
                         url=url,
-                        message="Text ad headline not found"
+                        message="No valid text ad headline"
                     )
-                    print(f"✅ Row {row_num}: SKIPPED (no valid headline)")
-                    print(f"{'='*80}\n")
                     return
 
-                print(f"   ✅ Headline: {headline[:50]}...")
-                if description != "N/A":
-                    print(f"   ✅ Description: {description[:50]}...")
-
-                # Find packages and match to headline
-                print(f"   📦 Extracting packages from page...")
+                # Extract packages and match
                 all_packages = extract_package_from_page(page)
-                print(f"   📦 Found {len(all_packages)} package candidate(s)")
-                
-                if all_packages:
-                    for pkg in list(all_packages)[:3]:
-                        print(f"      - {pkg}")
-                
                 package_name = get_best_matching_package(headline, advertiser, all_packages)
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
-                    print(f"   ✅ Package matched (90% threshold): {package_name}")
                     status = "SUCCESS"
                 else:
                     app_link = "N/A"
                     package_name = "NOT FOUND"
-                    print(f"   ⚠️  No package match found at 90% threshold")
                     status = "TEXT_AD_NO_MATCH"
 
-                # ═══════════════════════════════════════════════════════════
-                # SAVE TEXT AD DATA
-                # ═══════════════════════════════════════════════════════════
-                
+                # Save TEXT AD data
                 data = [
                     advertiser,
                     package_name,
                     url,
                     app_link,
                     text_time,
-                    "TEXT_AD",              # ← SHOW "TEXT_AD" (NOT A VIDEO ID)
+                    "TEXT_AD",  # ← Show "TEXT_AD" in video ID column
                     text_time
                 ]
 
-                log_msg = f"TEXT_AD | Package: {package_name} | Headline: {headline[:40]}"
+                message = f"TEXT_AD | Package: {package_name} | Headline: {headline[:40]}"
 
-            # ═══════════════════════════════════════════════════════════════
-            # SAVE RESULTS (BOTH VIDEO AND TEXT ADS)
-            # ═══════════════════════════════════════════════════════════════
+            else:
+                # ════════════════════════════════════════════════════════════
+                # VIDEO AD PATH - Video detected
+                # ════════════════════════════════════════════════════════════
+                
+                print(f"🎬 Row {row_num}: VIDEO DETECTED - {video_id}")
+
+                # Extract app link using ORIGINAL logic
+                app_link = wait_and_extract_install_link(page, max_wait_seconds=35)
+                app_link_time = get_exact_time()
+
+                # Extract headline and description
+                headline, description = wait_and_extract_headline_description(page, max_wait_seconds=15)
+
+                # Extract package from app link
+                package_name = extract_package_name(app_link)
+
+                if app_link == "N/A":
+                    status = "VIDEO_FOUND_APP_LINK_NOT_FOUND"
+                    message = "Video ID found, but app link not found"
+                else:
+                    status = "SUCCESS"
+                    message = f"VIDEO_AD | Video: {video_id} | Package: {package_name}"
+
+                # Save VIDEO AD data
+                data = [
+                    advertiser,
+                    package_name,
+                    url,
+                    app_link,
+                    app_link_time,
+                    video_id,  # ← Actual video ID
+                    video_time
+                ]
+
+            # ════════════════════════════════════════════════════════════
+            # SAVE TO SHEET
+            # ════════════════════════════════════════════════════════════
             
-            print(f"   💾 Saving to Google Sheet...")
             safe_update_combined_row(row_num, data)
             safe_update_headline_desc(row_num, headline, description)
 
             safe_add_log(
                 row_number=row_num,
                 status=status,
-                log_type="SCRAPING",
+                log_type="COMBINED",
                 url=url,
                 video_id=video_id if video_id != "N/A" else "TEXT_AD",
                 app_link=app_link,
-                message=log_msg
+                message=message
             )
 
             print(f"✅ Row {row_num}: SAVED")
-            print(f"{'='*80}\n")
 
         except Exception as e:
             error_time = get_exact_time()
-            error_msg = str(e)[:150]
 
-            print(f"❌ Row {row_num} ERROR: {error_msg}")
-            print(f"{'='*80}\n")
+            print(f"❌ Row {row_num} error: {str(e)[:80]}")
 
             try:
-                data = ["", "N/A", url, "ERROR", error_time, "ERROR", error_time]
+                data = [
+                    "",
+                    "N/A",
+                    url,
+                    "ERROR",
+                    error_time,
+                    "ERROR",
+                    error_time
+                ]
+
                 safe_update_combined_row(row_num, data)
                 safe_update_headline_desc(row_num, "N/A", "N/A")
             except Exception:
@@ -882,9 +1072,9 @@ def scrape_single_url(url_row):
                 safe_add_log(
                     row_number=row_num,
                     status="ERROR",
-                    log_type="SCRAPING",
+                    log_type="COMBINED",
                     url=url,
-                    message=error_msg
+                    message=str(e)[:100]
                 )
             except Exception:
                 pass
@@ -895,8 +1085,8 @@ def scrape_single_url(url_row):
             browser.close()
 
 
-def run_parallel_scraper(max_workers=MAX_WORKERS):
-    """Run the unified scraper in parallel."""
+def run_parallel_combined_scraper(max_workers=MAX_WORKERS):
+    """Run scraper in parallel."""
     urls = sheets.get_urls_with_retry()
 
     url_rows = [
@@ -906,14 +1096,11 @@ def run_parallel_scraper(max_workers=MAX_WORKERS):
     ]
 
     if not url_rows:
-        print("❌ No URLs found in sheet")
+        print("No URLs found in sheet")
         return
 
-    print(f"\n{'='*80}")
-    print(f"🚀 UNIFIED VIDEO + TEXT AD SCRAPER (FIXED)")
-    print(f"   Total URLs to scrape: {len(url_rows)}")
-    print(f"   Max workers: {max_workers}")
-    print(f"{'='*80}\n")
+    print(f"🚀 Starting unified scraper for {len(url_rows)} rows")
+    print(f"⚡ Running with max_workers={max_workers}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -921,22 +1108,16 @@ def run_parallel_scraper(max_workers=MAX_WORKERS):
             for url_row in url_rows
         }
 
-        completed = 0
         for future in as_completed(futures):
             row_num, _ = futures[future]
-            completed += 1
 
             try:
                 future.result()
             except Exception as e:
                 print(f"❌ Worker failed for row {row_num}: {str(e)[:80]}")
 
-            print(f"📊 Progress: {completed}/{len(url_rows)}")
-
-    print(f"\n{'='*80}")
-    print(f"✅ SCRAPING COMPLETE - All {len(url_rows)} URLs processed")
-    print(f"{'='*80}\n")
+    print("✅ Finished scraping")
 
 
 if __name__ == "__main__":
-    run_parallel_scraper(max_workers=MAX_WORKERS)
+    run_parallel_combined_scraper(max_workers=MAX_WORKERS)
