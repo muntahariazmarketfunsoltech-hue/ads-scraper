@@ -1175,6 +1175,34 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
     return {'headline':'N/A', 'description':'N/A'}
 
+    def read_target(target):
+        try:
+            data = target.evaluate(js)
+            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+                return data
+        except Exception:
+            return None
+        return None
+
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_seconds:
+        # 1) Check main page DOM first (active visible creative)
+        data = read_target(page)
+        if data:
+            return data
+
+        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            data = read_target(frame)
+            if data:
+                return data
+
+        page.wait_for_timeout(1000)
+
+    return {"headline": "N/A", "description": "N/A"}
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1409,6 +1437,7 @@ def scrape_single_url(url_row):
             print(f"📦 Row {row_num}: resolving package from visible install link first")
 
             if visible_package != "N/A":
+                # ✅ Text ad takes package from visible install link first
                 package_name = visible_package
                 app_link = visible_app_link
                 match_score = 1.0
