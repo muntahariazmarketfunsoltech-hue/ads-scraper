@@ -781,157 +781,7 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """
-    Extracts headline and description for IMAGE ADS.
-    CRITICAL FIX: Only extracts from the TOP/ACTIVE creative, not other ads on page.
-    Finds the creative container with an image, then extracts text FROM THAT CONTAINER ONLY.
-    """
-    js = r"""
-    () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-
-        const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
-        };
-
-        let headline = "N/A";
-        let description = "N/A";
-
-        // CRITICAL: Find the ACTIVE creative container (has image + is most visible)
-        // This prevents picking text from other ads on the page
-        
-        // Step 1: Find ALL containers that have an image (likely creative containers)
-        const containers = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
-            // Must have an image inside
-            const img = el.querySelector('img, picture, canvas, svg');
-            if (!img) return false;
-            
-            // Must be reasonably sized (not tiny)
-            const rect = el.getBoundingClientRect();
-            if (rect.width < 100 || rect.height < 100) return false;
-            
-            return isVisible(el);
-        });
-
-        if (containers.length === 0) {
-            return { headline, description };
-        }
-
-        // Step 2: Pick the TOPMOST container (the active one, first on page)
-        let topContainer = containers[0];
-        let topY = topContainer.getBoundingClientRect().top;
-
-        for (let container of containers) {
-            const y = container.getBoundingClientRect().top;
-            if (y < topY) {
-                topY = y;
-                topContainer = container;
-            }
-        }
-
-        // Step 3: Extract headline and description ONLY FROM THIS TOP CONTAINER
-        const headlineSelectors = [
-            'div.landscape-app-title',
-            '[class*="app-title"]',
-            '[class*="headline"]',
-            'span',
-            'div'
-        ];
-
-        for (let selector of headlineSelectors) {
-            const elements = topContainer.querySelectorAll(selector);
-            
-            for (let el of elements) {
-                if (!isVisible(el)) continue;
-                
-                // Skip if has children (only leaf text nodes)
-                if (el.children.length > 0) continue;
-                
-                const txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length > 2 && txt.length <= 150 && 
-                    !txt.includes('{{') && 
-                    !txt.toLowerCase().includes('install') &&
-                    !txt.toLowerCase().includes('download')) {
-                    headline = txt;
-                    break;
-                }
-            }
-            if (headline !== "N/A") break;
-        }
-
-        // Step 4: Extract description ONLY FROM TOP CONTAINER, MUST BE DIFFERENT FROM HEADLINE
-        const descriptionSelectors = [
-            'div.landscape-app-text',
-            '[class*="app-text"]',
-            '[class*="description"]',
-            'p',
-            'span',
-            'div'
-        ];
-
-        for (let selector of descriptionSelectors) {
-            const elements = topContainer.querySelectorAll(selector);
-            
-            for (let el of elements) {
-                if (!isVisible(el)) continue;
-                
-                // Skip if has children (only leaf text nodes)
-                if (el.children.length > 0) continue;
-                
-                const txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length > 2 && txt.length <= 200 && 
-                    txt !== headline &&
-                    !txt.includes('{{') && 
-                    !txt.toLowerCase().includes('install') &&
-                    !txt.toLowerCase().includes('download')) {
-                    description = txt;
-                    break;
-                }
-            }
-            if (description !== "N/A") break;
-        }
-
-        return { headline, description };
-    }
-    """
-
-    def read_target(target):
-        try:
-            data = target.evaluate(js)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
-        except Exception:
-            return None
-        return None
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-        # 1) Check MAIN PAGE DOM FIRST (active visible creative)
-        data = read_target(page)
-        if data:
-            return data
-
-        # 2) Fallback: check iframes only if main page didn't yield headline/description
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            data = read_target(frame)
-            if data:
-                return data
-
-        page.wait_for_timeout(1000)
-
-    return {"headline": "N/A", "description": "N/A"}
 # =========================
-
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
 
@@ -1289,6 +1139,7 @@ def _score_non_video_target(target):
             const src = String(el.getAttribute('src') || '').toLowerCase();
             const alt = String(el.getAttribute('alt') || '').toLowerCase();
             if (src.includes('googlelogo') || alt.includes('google')) return false;
+            const rect = el.getBoundingClientRect();
             return isVisible(el) && rect.width >= 80 && rect.height >= 50;
         });
 
@@ -1570,25 +1421,15 @@ def scrape_single_url(url_row):
             text_data = wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15)
             headline = clean_text(text_data.get("headline"))
             description = clean_text(text_data.get("description"))
+            process_time = get_exact_time()
+            has_text = is_valid_text_ad(headline, description)
 
             # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
             is_image_like = has_visible_image_creative(page)
-            ad_type = "text" if headline != "N/A" else "image" if is_image_like else "N/A"
-            process_time = get_exact_time()
-
-            # For IMAGE ads, use enhanced extraction
-            if ad_type == "image":
-                print(f"🖼 Row {row_num}: image ad detected, extracting enhanced headline/description")
-                image_data = wait_and_extract_image_ad_details(page, max_wait_seconds=15)
-                headline = clean_text(image_data.get("headline"))
-                description = clean_text(image_data.get("description"))
-                print(f"🖼 Row {row_num}: image ad headline -> {headline}")
-                print(f"🖼 Row {row_num}: image ad description -> {description}")
-
-            has_text = is_valid_text_ad(headline, description)
+            ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
@@ -1617,9 +1458,9 @@ def scrape_single_url(url_row):
                 print(f"⏭ Row {row_num}: no video and no valid text/image ad found")
                 return
 
-            if headline != "N/A":
+            if has_text:
                 print(f"🔎 Row {row_num}: headline -> {headline}")
-            if ad_type == "image":
+            else:
                 print(f"🖼 Row {row_num}: image ad detected")
 
             # Try to extract package from page
