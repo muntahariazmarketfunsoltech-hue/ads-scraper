@@ -844,7 +844,7 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
     return None, best_score
 
 def decode_all(text):
-    """Decode every encoding variant so no package name is missed."""
+    """Decode every encoding variant so no package name is missed.""" 
     text = re.sub(r'\\x3[Dd]', '=', text)
     text = re.sub(r'\\x26',    '&', text)
     text = re.sub(r'\\x3[Ff]', '?', text)
@@ -1230,7 +1230,12 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-    def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
+
+# =========================
+# IMAGE-AD EXTRACTION (NEW)
+# =========================
+
+def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Attempts to extract headline and description for image/display creatives by:
     - Finding large visible image-like elements.
@@ -1387,6 +1392,7 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return "N/A", "N/A"
+
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1582,18 +1588,18 @@ def scrape_single_url(url_row):
             # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
-           # After:
+
             is_image_like = has_visible_image_creative(page)
 
             # NEW: If image-like and no text was detected, try image-specific extraction
             if not has_text and is_image_like:
                 img_headline, img_description = wait_and_extract_image_ad_details(page, max_wait_seconds=8)
                 # Only accept non-CTA results
-            if img_headline != "N/A" or img_description != "N/A":
+                if img_headline != "N/A" or img_description != "N/A":
                     headline = clean_text(img_headline)
                     description = clean_text(img_description)
                     has_text = is_valid_text_ad(headline, description)
-            is_image_like = has_visible_image_creative(page)
+
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
