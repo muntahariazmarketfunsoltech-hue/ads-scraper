@@ -785,8 +785,10 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Enhanced extraction for IMAGE ADS.
-    Searches for headline/description using patterns specific to image creative preview.
-    Works in iframes and main page using multiple selector strategies.
+    Targets specific landscape image ad class names:
+    - landscape-app-title for headline
+    - landscape-app-text for description
+    Works in iframes and main page.
     """
     js = r"""
     () => {
@@ -805,87 +807,20 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // Strategy 1: Look for text near/around visible images (image ad companion text)
-        const images = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
-            const src = String(el.getAttribute('src') || '').toLowerCase();
-            const alt = String(el.getAttribute('alt') || '').toLowerCase();
-            if (src.includes('googlelogo') || alt.includes('google')) return false;
-            return isVisible(el);
-        });
-
-        if (images.length > 0) {
-            // Find text elements near the image
-            let allText = Array.from(document.querySelectorAll('*')).filter(el => {
-                if (el.childElementCount > 0) return false;
-                const txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length < 2 || txt.length > 220) return false;
-                if (txt.includes('{{') || txt.includes('}}')) return false;
-                return isVisible(el);
-            });
-
-            // Extract headline (shorter text, typically 3-60 chars)
-            for (let el of allText) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 3 && txt.length <= 80 && !txt.toLowerCase().includes('download') && !txt.toLowerCase().includes('install')) {
-                    headline = txt;
-                    break;
-                }
-            }
-
-            // Extract description (longer text, typically 15-220 chars)
-            for (let el of allText) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 15 && txt.length <= 220 && txt !== headline && !txt.toLowerCase().includes('download') && !txt.toLowerCase().includes('install')) {
-                    description = txt;
-                    break;
-                }
+        // PRIMARY: Target the exact class names from landscape image ads
+        const headlineEl = document.querySelector('.landscape-app-title');
+        if (headlineEl && isVisible(headlineEl)) {
+            let text = cleanText(headlineEl.innerText || headlineEl.textContent || '');
+            if (text.length > 1) {
+                headline = text;
             }
         }
 
-        // Strategy 2: Fallback to specific Google Ads class patterns
-        if (headline === "N/A") {
-            const headlineSelectors = [
-                '[class*="-e-15"]',
-                '[class*="headline"]',
-                '[class*="title"]',
-                'span[role="textbox"]',
-                'div[data-text-primary]'
-            ];
-            for (let selector of headlineSelectors) {
-                const els = document.querySelectorAll(selector);
-                for (let el of els) {
-                    if (isVisible(el)) {
-                        let txt = cleanText(el.innerText || el.textContent || '');
-                        if (txt.length >= 3 && txt.length <= 80 && !txt.includes('{{')) {
-                            headline = txt;
-                            break;
-                        }
-                    }
-                }
-                if (headline !== "N/A") break;
-            }
-        }
-
-        if (description === "N/A") {
-            const descSelectors = [
-                '[class*="-e-67"]',
-                '[class*="long-description"]',
-                '[class*="description"]',
-                'div[data-text-secondary]',
-                'span[role="textbox"]'
-            ];
-            for (let selector of descSelectors) {
-                const els = document.querySelectorAll(selector);
-                for (let el of els) {
-                    if (isVisible(el)) {
-                        let txt = cleanText(el.innerText || el.textContent || '');
-                        if (txt.length >= 8 && txt.length <= 220 && txt !== headline && !txt.includes('{{')) {
-                            description = txt;
-                            break;
-                        }
-                    }
-                }
-                if (description !== "N/A") break;
+        const descriptionEl = document.querySelector('.landscape-app-text');
+        if (descriptionEl && isVisible(descriptionEl)) {
+            let text = cleanText(descriptionEl.innerText || descriptionEl.textContent || '');
+            if (text.length > 1 && text !== headline) {
+                description = text;
             }
         }
 
