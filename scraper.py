@@ -1602,10 +1602,20 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
+                # If we have headline/description (from text or image extraction), run the strict matcher
                 if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
                     all_found_packages = extract_package_from_page(page)
                     package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+
+                    # If strict matcher didn't find anything, as a fallback attempt the looser character-level helper
+                    if not package_name:
+                        # keep previous helper available (if useful); try gentler match with lower threshold
+                        fallback_pkg, fallback_score = get_best_matching_package_for_text_ad(headline, description, all_found_packages, min_score=0.70)
+                        if fallback_pkg and fallback_score >= 0.70:
+                            package_name = fallback_pkg
+                            match_score = fallback_score
+                            print(f"ℹ️ Row {row_num}: fallback package match found -> {package_name} | score={match_score}")
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1616,8 +1626,8 @@ def scrape_single_url(url_row):
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
-                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
+                    message = f"Non-video {ad_type} ad found, but package score below {MIN_PACKAGE_MATCH_SCORE}. Best score={match_score}"
+                    print(f"⚠️ Row {row_num}: package score below {MIN_PACKAGE_MATCH_SCORE}, writing N/A | best score={match_score}")
 
             data = [
                 advertiser,
