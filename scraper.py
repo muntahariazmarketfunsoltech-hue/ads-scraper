@@ -1429,6 +1429,34 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
+            # NEW: If it's image-like and no headline/description was captured,
+            # retry the iframe-only extractor and the relaxed text extractor so that
+            # image creatives can still yield headline/description (same logic as text ads).
+            if not has_text and is_image_like:
+                print(f"🔁 Row {row_num}: image-like creative detected, attempting additional headline/description extraction")
+                try:
+                    hf_head, hf_desc = wait_and_extract_headline_description(page, max_wait_seconds=8)
+                    hf_head = clean_text(hf_head)
+                    hf_desc = clean_text(hf_desc)
+                    if is_valid_text_ad(hf_head, hf_desc):
+                        headline, description = hf_head, hf_desc
+                        has_text = True
+                        print(f"✅ Row {row_num}: extracted headline/description from iframe-only extractor -> {headline} | {description}")
+                except Exception:
+                    pass
+
+                if not has_text:
+                    try:
+                        td = wait_and_extract_text_ad_details(page, max_wait_seconds=8)
+                        td_head = clean_text(td.get("headline"))
+                        td_desc = clean_text(td.get("description"))
+                        if is_valid_text_ad(td_head, td_desc):
+                            headline, description = td_head, td_desc
+                            has_text = True
+                            print(f"✅ Row {row_num}: extracted headline/description from relaxed extractor -> {headline} | {description}")
+                    except Exception:
+                        pass
+
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
                     advertiser,
@@ -1474,22 +1502,63 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
+                # Apply the same strict matching logic used for text ads when possible.
+                # If headline/description were captured, use strict matching.
                 if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
                     all_found_packages = extract_package_from_page(page)
                     package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
 
-                if package_name:
+                # NEW: If it's image-like but we still don't have a strict match,
+                # try to extract packages from the page and pick a single valid package if it is the only candidate.
+                if not package_name and is_image_like:
+                    print(f"🔎 Row {row_num}: image ad fallback - searching page for package candidates")
+                    all_found_packages = extract_package_from_page(page)
+                    if len(all_found_packages) == 1:
+                        only_pkg = list(all_found_packages)[0]
+                        package_name = only_pkg
+                        match_score = 0.65
+                        app_link = f"https://play.google.com/store/apps/details?id={package_name}"
+                        status = "SUCCESS_SINGLE_PACKAGE_FOUND_IMAGE_AD"
+                        message = "Image ad: single package candidate found on page and used as fallback"
+                        print(f"✅ Row {row_num}: single package candidate -> {package_name}")
+                    else:
+                        # If we have headline/description we already attempted strict match above.
+                        # As a last resort, attempt best fuzzy match using the same strict function
+                        # (it will return best_score even if below threshold).
+                        if not has_text and all_found_packages:
+                            # Try to get best match using advertiser as a hint (if present)
+                            hint_head = headline if headline != "N/A" else advertiser
+                            hint_desc = description if description != "N/A" else ""
+                            package_name, match_score = get_best_matching_package(hint_head, hint_desc, all_found_packages)
+                            if package_name:
+                                app_link = f"https://play.google.com/store/apps/details?id={package_name}"
+                                if match_score >= MIN_PACKAGE_MATCH_SCORE:
+                                    status = "SUCCESS"
+                                    message = f"Image ad: package matched with relaxed hint score {match_score}"
+                                else:
+                                    status = "NON_VIDEO_PACKAGE_NOT_FOUND"
+                                    message = f"Image ad: best package score below threshold ({match_score})"
+                                    package_name = "N/A"
+                                    app_link = "N/A"
+                                    print(f"⚠️ Row {row_num}: image ad package best score below threshold -> {match_score}")
+                            else:
+                                package_name = "N/A"
+                                app_link = "N/A"
+                                status = "NON_VIDEO_PACKAGE_NOT_FOUND"
+                                message = "Image ad: no suitable package found"
+                        else:
+                            package_name = "N/A"
+                            app_link = "N/A"
+                            status = "NON_VIDEO_PACKAGE_NOT_FOUND"
+                            message = f"Non-video {ad_type} ad found, but package score below {MIN_PACKAGE_MATCH_SCORE}. Best score={match_score}"
+                            print(f"⚠️ Row {row_num}: package score below {MIN_PACKAGE_MATCH_SCORE}, writing N/A | best score={match_score}")
+
+                elif package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
                     status = "SUCCESS"
                     message = f"Non-video {ad_type} ad package strictly matched with score {match_score}"
                     print(f"✅ Row {row_num}: strict matched package -> {package_name} | score={match_score}")
-                else:
-                    package_name = "N/A"
-                    app_link = "N/A"
-                    status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
-                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
 
             data = [
                 advertiser,
