@@ -784,10 +784,10 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Uses the SAME METHOD as text ads:
-    - Specific class name selectors
-    - Main page DOM first (active visible creative)
-    - Falls back to iframe if necessary
+    Uses the SAME METHOD as text ads but CLEARS CACHE.
+    - Specific class name selectors (fresh query each time)
+    - Main page DOM FIRST (where active visible creative is)
+    - Falls back to iframes if necessary
     - Relaxed visibility check
     """
     js = r"""
@@ -808,29 +808,63 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // 1️⃣ IMAGE AD SPECIFIC CLASS SELECTORS (same method as text ads)
-        // Try multiple class patterns used by Google Ads for image creatives
-        const headlineEl = document.querySelector(
-            'div.landscape-app-title, ' +
-            '[class*="app-title"], ' +
-            '[class*="headline"], ' +
-            'div[role="link"] span, ' +
-            'div.HFTpmd-WsjYwc-hgDUwe, ' +
+        // 1️⃣ FRESH QUERY: Don't use cached selectors, query all and pick FIRST visible
+        // This prevents picking stale text from previous ads
+        
+        // HEADLINE: Try each selector in order, take FIRST visible match only
+        const headlineSelectors = [
+            'div.landscape-app-title',
+            '[class*="app-title"]:not([style*="display: none"])',
+            '[class*="headline"]:not([style*="display: none"])',
+            'div[role="link"] span',
+            'div.HFTpmd-WsjYwc-hgDUwe',
             'div.cS4Vcb-vnv8ic'
-        );
-        if (headlineEl && isVisible(headlineEl)) {
-            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
+        ];
+
+        for (let selector of headlineSelectors) {
+            const elements = document.querySelectorAll(selector);
+            if (elements.length === 0) continue;
+            
+            // Get FIRST visible element only (not all)
+            for (let i = 0; i < elements.length; i++) {
+                const el = elements[i];
+                if (isVisible(el)) {
+                    const txt = cleanText(el.innerText || el.textContent);
+                    if (txt.length > 0 && txt.length <= 150 && !txt.includes('{{')) {
+                        headline = txt;
+                        break;
+                    }
+                }
+            }
+            if (headline !== "N/A") break; // Found, stop looking
         }
 
-        const descriptionEl = document.querySelector(
-            'div.landscape-app-text, ' +
-            '[class*="app-text"], ' +
-            '[class*="long-description"], ' +
-            'div.HFTpmd-WsjYwc-hgDUwe, ' +
+        // DESCRIPTION: Try each selector in order, take FIRST visible match that's different from headline
+        const descriptionSelectors = [
+            'div.landscape-app-text',
+            '[class*="app-text"]:not([style*="display: none"])',
+            '[class*="long-description"]:not([style*="display: none"])',
+            'div.HFTpmd-WsjYwc-hgDUwe',
             'div.cS4Vcb-vnv8ic'
-        );
-        if (descriptionEl && isVisible(descriptionEl)) {
-            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
+        ];
+
+        for (let selector of descriptionSelectors) {
+            const elements = document.querySelectorAll(selector);
+            if (elements.length === 0) continue;
+            
+            // Get FIRST visible element only (not all)
+            for (let i = 0; i < elements.length; i++) {
+                const el = elements[i];
+                if (isVisible(el)) {
+                    const txt = cleanText(el.innerText || el.textContent);
+                    // Must be different from headline and not empty
+                    if (txt.length > 0 && txt.length <= 200 && txt !== headline && !txt.includes('{{')) {
+                        description = txt;
+                        break;
+                    }
+                }
+            }
+            if (description !== "N/A") break; // Found, stop looking
         }
 
         return { headline, description };
@@ -849,12 +883,12 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # 1) Check main page DOM first (active visible creative) - SAME AS TEXT ADS
+        # 1) Check MAIN PAGE DOM FIRST (active visible creative)
         data = read_target(page)
         if data:
             return data
 
-        # 2) Fallback: check iframes only if main DOM didn't yield headline/description - SAME AS TEXT ADS
+        # 2) Fallback: check iframes only if main page didn't yield headline/description
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
