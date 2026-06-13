@@ -784,22 +784,24 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Uses the SAME METHOD as text ads but CLEARS CACHE.
-    - Specific class name selectors (fresh query each time)
-    - Main page DOM FIRST (where active visible creative is)
-    - Falls back to iframes if necessary
-    - Relaxed visibility check
+    Clears cache by:
+    1. Only targeting CURRENTLY VISIBLE elements in viewport
+    2. Skipping elements outside viewport
+    3. Taking elements that are most recently rendered
     """
     js = r"""
     () => {
         const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
-        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
+            
+            // STRICT: Must be in current viewport, not hidden
             return rect.width > 0 && rect.height > 0 &&
+                   rect.top >= -100 && rect.top <= window.innerHeight + 100 && // In or near viewport
+                   rect.left >= -100 && rect.left <= window.innerWidth + 100 &&
                    style.visibility !== 'hidden' &&
                    style.display !== 'none' &&
                    style.opacity !== '0';
@@ -808,10 +810,9 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // 1️⃣ FRESH QUERY: Don't use cached selectors, query all and pick FIRST visible
-        // This prevents picking stale text from previous ads
+        // STRATEGY: Find visible elements that are in the current creative area (not logs/page chrome)
+        // Filter to only CURRENT viewport elements
         
-        // HEADLINE: Try each selector in order, take FIRST visible match only
         const headlineSelectors = [
             'div.landscape-app-title',
             '[class*="app-title"]:not([style*="display: none"])',
@@ -825,21 +826,30 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             const elements = document.querySelectorAll(selector);
             if (elements.length === 0) continue;
             
-            // Get FIRST visible element only (not all)
+            // Get elements sorted by Y position (top to bottom)
+            const visible = [];
             for (let i = 0; i < elements.length; i++) {
                 const el = elements[i];
                 if (isVisible(el)) {
                     const txt = cleanText(el.innerText || el.textContent);
                     if (txt.length > 0 && txt.length <= 150 && !txt.includes('{{')) {
-                        headline = txt;
-                        break;
+                        visible.push({
+                            text: txt,
+                            y: el.getBoundingClientRect().top
+                        });
                     }
                 }
             }
-            if (headline !== "N/A") break; // Found, stop looking
+            
+            // Sort by Y position and take the FIRST one (top-most visible element)
+            if (visible.length > 0) {
+                visible.sort((a, b) => a.y - b.y);
+                headline = visible[0].text;
+                break;
+            }
         }
 
-        // DESCRIPTION: Try each selector in order, take FIRST visible match that's different from headline
+        // DESCRIPTION: Look for text AFTER headline, in lower position
         const descriptionSelectors = [
             'div.landscape-app-text',
             '[class*="app-text"]:not([style*="display: none"])',
@@ -852,19 +862,27 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             const elements = document.querySelectorAll(selector);
             if (elements.length === 0) continue;
             
-            // Get FIRST visible element only (not all)
+            // Get elements sorted by Y position
+            const visible = [];
             for (let i = 0; i < elements.length; i++) {
                 const el = elements[i];
                 if (isVisible(el)) {
                     const txt = cleanText(el.innerText || el.textContent);
-                    // Must be different from headline and not empty
                     if (txt.length > 0 && txt.length <= 200 && txt !== headline && !txt.includes('{{')) {
-                        description = txt;
-                        break;
+                        visible.push({
+                            text: txt,
+                            y: el.getBoundingClientRect().top
+                        });
                     }
                 }
             }
-            if (description !== "N/A") break; // Found, stop looking
+            
+            // Sort by Y position and take the FIRST one
+            if (visible.length > 0) {
+                visible.sort((a, b) => a.y - b.y);
+                description = visible[0].text;
+                break;
+            }
         }
 
         return { headline, description };
