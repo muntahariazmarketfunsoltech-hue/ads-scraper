@@ -1231,54 +1231,185 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-
-def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """Extract headline + description from IMAGE ads."""
+# =========================
+# NEW: IMAGE-AD DETAILS EXTRACTION
+# =========================
+def extract_image_ad_details(page, max_wait_seconds=10):
+    """
+    Attempts to find the main image/display creative container and extract:
+        - headline (first suitable visible text near the image)
+        - description (next suitable text)
+        - app_link (visible install link inside the same container)
+    Returns (headline, description, app_link) or ("N/A", "N/A", "N/A").
+    This searches main page and iframes and uses a visual/structural heuristic to avoid
+    grabbing page chrome.
+    """
     js = r"""
     () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+            return rect.width > 20 && rect.height > 20 && rect.bottom > 0 && rect.right > 0 &&
+                   rect.top < window.innerHeight && rect.left < window.innerWidth &&
+                   style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
-        let headline = "N/A";
-        let description = "N/A";
-        const allVisible = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4')).filter(el => {
-            const txt = cleanText(el.innerText || el.textContent);
-            return isVisible(el) && txt.length > 2;
+
+        const badImageSrc = (src, alt) => {
+            if (!src) return true;
+            src = src.toLowerCase();
+            alt = String(alt || '').toLowerCase();
+            if (src.includes('googlelogo') || alt.includes('google')) return true;
+            return false;
+        };
+
+        // Candidate containers: elements that contain at least one visible image-like child.
+        const containers = Array.from(document.querySelectorAll('body *')).filter(el => {
+            try {
+                if (el.childElementCount === 0) return false;
+                const imgs = el.querySelectorAll('img, picture, canvas, svg');
+                if (!imgs || imgs.length === 0) return false;
+                let anyVisible = false;
+                for (let im of imgs) {
+                    const src = String(im.getAttribute('src') || im.getAttribute('data-src') || '').toLowerCase();
+                    const alt = String(im.getAttribute('alt') || '').toLowerCase();
+                    const rect = im.getBoundingClientRect();
+                    if (rect.width < 60 || rect.height < 40) continue;
+                    if (!isVisible(im)) continue;
+                    if (badImageSrc(src, alt)) continue;
+                    anyVisible = true;
+                    break;
+                }
+                if (!anyVisible) return false;
+                // Avoid huge containers that are site chrome by size or that are the whole page.
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 80 || rect.height < 40) return false;
+                if (rect.width > window.innerWidth - 10 && rect.height > window.innerHeight - 10) return false;
+                return true;
+            } catch (e) {
+                return false;
+            }
         });
-        for (const el of allVisible) {
-            const txt = cleanText(el.innerText || el.textContent);
-            if (txt.length >= 3 && txt.length <= 120 && txt.toLowerCase() !== "install" && txt.toLowerCase() !== "ad") { headline = txt; break; }
+
+        // Prioritize containers near top and with reasonable area.
+        containers.sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            const scoreA = (Math.min(ra.width * ra.height, 100000) / 1000) - Math.abs(ra.top);
+            const scoreB = (Math.min(rb.width * rb.height, 100000) / 1000) - Math.abs(rb.top);
+            return scoreB - scoreA;
+        });
+
+        for (let cont of containers) {
+            try {
+                // Find text nodes inside container: leaf nodes with visible text.
+                const textEls = Array.from(cont.querySelectorAll('*')).filter(el => {
+                    if (el.childElementCount > 0) return false;
+                    const txt = (el.innerText || el.textContent || '').trim();
+                    if (!txt) return false;
+                    if (txt.length < 2 || txt.length > 220) return false;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 10 || rect.height < 6) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+                    // Filter templating
+                    if (txt.includes('{{') || txt.includes('}}')) return false;
+                    return true;
+                });
+
+                // Collect cleaned text lines
+                const lines = textEls.map(el => (el.innerText || el.textContent || '').replace(/\n/g, ' ').trim()).filter(Boolean);
+
+                // Heuristic headline/description selection
+                let headline = "N/A";
+                let description = "N/A";
+
+                if (lines.length > 0) {
+                    // prefer the shortest suitable line as headline (often title)
+                    for (let ln of lines) {
+                        if (ln.length >= 3 && ln.length <= 80) {
+                            headline = ln;
+                            break;
+                        }
+                    }
+                    if (headline === "N/A" && lines[0]) headline = lines[0];
+
+                    // pick next line as description if reasonable
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i] === headline && i + 1 < lines.length && lines[i + 1].length >= 8) {
+                            description = lines[i + 1];
+                            break;
+                        }
+                    }
+                    if (description === "N/A") {
+                        for (let ln of lines) {
+                            if (ln !== headline && ln.length >= 8) {
+                                description = ln;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Try to find an install link inside the container
+                const anchors = Array.from(cont.querySelectorAll('a[href], a[data-href]'));
+                let foundHref = null;
+                for (let a of anchors) {
+                    const href = a.href || a.getAttribute('href') || a.getAttribute('data-href') || '';
+                    if (!href) continue;
+                    const hrefL = href.toLowerCase();
+                    if (hrefL.includes('googleadservices.com/pagead/aclk') ||
+                        hrefL.includes('play.google.com') ||
+                        hrefL.includes('apps.apple.com') ||
+                        hrefL.includes('itunes.apple.com')) {
+                        foundHref = href;
+                        break;
+                    }
+                    // also accept ad click trackers that include destination query params
+                    if (hrefL.includes('adurl=') || hrefL.includes('dest=')) {
+                        foundHref = href;
+                    }
+                }
+
+                // If we have at least an image and some text, return result
+                const imgs = cont.querySelectorAll('img, picture, canvas, svg');
+                if (imgs.length > 0 && (headline !== "N/A" || description !== "N/A" || foundHref)) {
+                    return { headline, description, href: foundHref || null };
+                }
+            } catch (e) {
+                continue;
+            }
         }
-        for (const el of allVisible) {
-            const txt = cleanText(el.innerText || el.textContent);
-            if (txt.length >= 5 && txt.length <= 250 && txt !== headline && txt.toLowerCase() !== "install") { description = txt; break; }
-        }
-        return {headline, description};
+
+        return null;
     }
     """
+
     start = time.time()
     while time.time() - start < max_wait_seconds:
+        # 1) try main page
         try:
-            data = page.evaluate(js)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
+            res = page.evaluate(js)
+            if res and (res.get("headline") != "N/A" or res.get("description") != "N/A" or res.get("href")):
+                return clean_text(res.get("headline")), clean_text(res.get("description")), (res.get("href") or "N/A")
         except Exception:
             pass
+
+        # 2) try iframes
         for frame in page.frames:
             try:
-                data = frame.evaluate(js)
-                if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                    return data
+                res = frame.evaluate(js)
+                if res and (res.get("headline") != "N/A" or res.get("description") != "N/A" or res.get("href")):
+                    return clean_text(res.get("headline")), clean_text(res.get("description")), (res.get("href") or "N/A")
             except Exception:
                 continue
-        page.wait_for_timeout(1000)
-    return {"headline":"N/A","description":"N/A"}
+
+        page.wait_for_timeout(700)
+
+    return "N/A", "N/A", "N/A"
+
 # =========================
-# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
+# END NEW: IMAGE-AD DETAILS EXTRACTION
 # =========================
 
 def is_valid_text_ad(headline, description):
@@ -1463,25 +1594,18 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            is_image_like = has_visible_image_creative(page)
-
-            if is_image_like:
-                ad_data = wait_and_extract_image_ad_details(page, max_wait_seconds=15)
-            else:
-                ad_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-
-            headline = clean_text(ad_data.get("headline"))
-            description = clean_text(ad_data.get("description"))
+            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
+            headline = clean_text(text_data.get("headline"))
+            description = clean_text(text_data.get("description"))
             process_time = get_exact_time()
             has_text = is_valid_text_ad(headline, description)
 
+            # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
-            if is_image_like:
-                ad_type = "image"
-            else:
-                ad_type = "text" if has_text else "N/A"
+            is_image_like = has_visible_image_creative(page)
+            ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
@@ -1517,6 +1641,36 @@ def scrape_single_url(url_row):
 
             print(f"📦 Row {row_num}: resolving package from visible install link first")
 
+            # Special handling for image-only creatives: try to extract text and app link from the image container
+            image_headline = None
+            image_description = None
+            image_container_app_link = None
+
+            if not has_text and ad_type == "image":
+                try:
+                    ih, idesc, ilink = extract_image_ad_details(page, max_wait_seconds=8)
+                    if ih and ih != "N/A":
+                        image_headline = ih
+                    if idesc and idesc != "N/A":
+                        image_description = idesc
+                    if ilink and ilink != "N/A":
+                        image_container_app_link = ilink
+
+                    if image_headline:
+                        print(f"🔎 Row {row_num}: extracted image container headline -> {image_headline}")
+                        # adopt the extracted headline/description as the ad visible text
+                        headline = image_headline
+                        description = image_description or "N/A"
+                        has_text = is_valid_text_ad(headline, description)
+                except Exception:
+                    pass
+
+                # If we found an app link inside the image container, prefer it over the generic visible_app_link
+                if image_container_app_link and image_container_app_link != "N/A":
+                    visible_app_link = image_container_app_link
+                    visible_package = extract_package_name(visible_app_link)
+                    print(f"✅ Row {row_num}: found install link inside image container -> {visible_app_link}")
+
             if visible_package != "N/A":
                 package_name = visible_package
                 app_link = visible_app_link
@@ -1528,10 +1682,22 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
+                # If we have visible text (either from text-ad flow or extracted from image container) try strict matching
                 if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
                     all_found_packages = extract_package_from_page(page)
                     package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+
+                # If still not found and we are image ad without text-derived match, try a looser match using image container text + page packages
+                if not package_name and ad_type == "image":
+                    # If image container provided some text, try strict matching with that
+                    if image_headline or image_description:
+                        combined_head = image_headline or headline
+                        combined_desc = image_description or description
+                        all_found_packages = extract_package_from_page(page)
+                        package_name, match_score = get_best_matching_package(combined_head, combined_desc, all_found_packages)
+                        if package_name:
+                            print(f"✅ Row {row_num}: strict matched package from image container text -> {package_name} | score={match_score}")
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1542,8 +1708,8 @@ def scrape_single_url(url_row):
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
-                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
+                    message = f"Non-video {ad_type} ad found, but package score below {MIN_PACKAGE_MATCH_SCORE}. Best score={match_score}"
+                    print(f"⚠️ Row {row_num}: package score below {MIN_PACKAGE_MATCH_SCORE}, writing N/A | best score={match_score}")
 
             data = [
                 advertiser,
