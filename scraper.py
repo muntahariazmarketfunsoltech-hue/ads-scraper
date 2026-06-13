@@ -907,45 +907,123 @@ def extract_packages_from_text(raw_text):
 def extract_package_from_page(page):
     """
     Scans strictly the rendered DOM and visible links. 
-    Removes the background network fetching that caused cross-contamination.
+    Collects more sources (outerHTML even if short, script text, meta tags, href/src/data- attributes)
+    so package names used only in small scripts/attributes are not missed.
     """
     collected_texts = []
 
+    # Collect from frames (always include outerHTML, regardless of length)
     for frame in page.frames:
         try:
-            frame_html = frame.evaluate("() => document.documentElement.outerHTML")
-            if frame_html and len(frame_html) > 200:
-                collected_texts.append(frame_html)
+            # outerHTML
+            try:
+                frame_html = frame.evaluate("() => document.documentElement.outerHTML")
+                if frame_html:
+                    collected_texts.append(frame_html)
+            except Exception:
+                pass
 
-            hrefs = frame.evaluate("""
-                () => Array.from(document.querySelectorAll('a[href]'))
-                           .map(a => a.href).filter(Boolean)
-            """)
-            if hrefs:
-                collected_texts.append('\n'.join(hrefs))
+            # hrefs & srcs
+            try:
+                hrefs = frame.evaluate("""
+                    () => Array.from(document.querySelectorAll('a[href], link[href], img[src], script[src], source[src]'))
+                               .map(e => e.href || e.src || e.getAttribute('href') || e.getAttribute('src') || '')
+                               .filter(Boolean)
+                """)
+                if hrefs:
+                    collected_texts.append('\n'.join(hrefs))
+            except Exception:
+                pass
 
-            visible = frame.evaluate("() => document.body ? document.body.innerText : ''")
-            if visible:
-                collected_texts.append(visible)
+            # body visible text
+            try:
+                visible = frame.evaluate("() => document.body ? document.body.innerText : ''")
+                if visible:
+                    collected_texts.append(visible)
+            except Exception:
+                pass
+
+            # script tag contents + meta tags + data-* attributes (concatenate)
+            try:
+                extra = frame.evaluate("""
+                    () => {
+                        const parts = [];
+                        for (const s of document.querySelectorAll('script')) {
+                            try { if (s.innerText) parts.push(s.innerText); } catch(e) {}
+                        }
+                        for (const m of document.querySelectorAll('meta')) {
+                            try { if (m.content) parts.push(m.content); } catch(e) {}
+                        }
+                        // collect some common data-* attrs and inline data
+                        for (const el of document.querySelectorAll('[data-appid], [data-id], [data-package], [data-src]')) {
+                            try {
+                                parts.push(String(el.getAttribute('data-appid')||''));
+                                parts.push(String(el.getAttribute('data-id')||''));
+                                parts.push(String(el.getAttribute('data-package')||''));
+                                parts.push(String(el.getAttribute('data-src')||''));
+                            } catch(e) {}
+                        }
+                        return parts.filter(Boolean).join('\\n');
+                    }
+                """)
+                if extra:
+                    collected_texts.append(extra)
+            except Exception:
+                pass
 
         except Exception:
             continue
+
+    # Main page collections
+    try:
+        main_html = page.evaluate("() => document.documentElement.outerHTML")
+        if main_html:
+            collected_texts.append(main_html)
+    except Exception:
+        pass
+
+    try:
+        hrefs = page.evaluate("""
+            () => Array.from(document.querySelectorAll('a[href], link[href], img[src], script[src], source[src]'))
+                       .map(e => e.href || e.src || e.getAttribute('href') || e.getAttribute('src') || '')
+                       .filter(Boolean)
+        """)
+        if hrefs:
+            collected_texts.append('\n'.join(hrefs))
+    except Exception:
+        pass
 
     try:
         visible = page.evaluate("() => document.body ? document.body.innerText : ''")
         if visible:
             collected_texts.append(visible)
-        
-        hrefs = page.evaluate("""
-            () => Array.from(document.querySelectorAll('a[href]'))
-                       .map(a => a.href).filter(Boolean)
+    except Exception:
+        pass
+
+    # Scripts/meta/data-* on main
+    try:
+        extra = page.evaluate("""
+            () => {
+                const parts = [];
+                for (const s of document.querySelectorAll('script')) {
+                    try { if (s.innerText) parts.push(s.innerText); } catch(e) {}
+                }
+                for (const m of document.querySelectorAll('meta')) {
+                    try { if (m.content) parts.push(m.content); } catch(e) {}
+                }
+                for (const el of document.querySelectorAll('[data-appid], [data-id], [data-package], [data-src]')) {
+                    try {
+                        parts.push(String(el.getAttribute('data-appid')||''));
+                        parts.push(String(el.getAttribute('data-id')||''));
+                        parts.push(String(el.getAttribute('data-package')||''));
+                        parts.push(String(el.getAttribute('data-src')||''));
+                    } catch(e) {}
+                }
+                return parts.filter(Boolean).join('\\n');
+            }
         """)
-        if hrefs:
-            collected_texts.append('\n'.join(hrefs))
-            
-        main_html = page.evaluate("() => document.documentElement.outerHTML")
-        if main_html:
-            collected_texts.append(main_html)
+        if extra:
+            collected_texts.append(extra)
     except Exception:
         pass
 
@@ -1568,6 +1646,9 @@ def scrape_single_url(url_row):
                     process_time
                 ]
 
+                # debug print so we can verify what's sent to sheets when no creative found
+                print(f"DEBUG Row {row_num}: writing no-creative data -> {data}")
+
                 safe_update_combined_row(row_num, data)
                 safe_update_headline_desc(row_num, "N/A", "N/A")
 
@@ -1610,7 +1691,6 @@ def scrape_single_url(url_row):
 
                     # If strict matcher didn't find anything, as a fallback attempt the looser character-level helper
                     if not package_name:
-                        # keep previous helper available (if useful); try gentler match with lower threshold
                         fallback_pkg, fallback_score = get_best_matching_package_for_text_ad(headline, description, all_found_packages, min_score=0.70)
                         if fallback_pkg and fallback_score >= 0.70:
                             package_name = fallback_pkg
@@ -1635,9 +1715,12 @@ def scrape_single_url(url_row):
                 url,
                 app_link,
                 process_time,
-                ad_type,      # Column F: text/image for non-video ads
+                ad_type,      # Column F: text/image for non-video ads (same column used for video_id in video path)
                 process_time
             ]
+
+            # Debug print to verify we are writing 'image' into the video-id column for image ads
+            print(f"DEBUG Row {row_num}: writing combined row -> {data}")
 
             safe_update_combined_row(row_num, data)
             safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
