@@ -785,10 +785,8 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Enhanced extraction for IMAGE ADS.
-    Targets specific landscape image ad class names:
-    - landscape-app-title for headline
-    - landscape-app-text for description
-    Works in iframes and main page.
+    Targets text elements that appear below the visible image.
+    Extracts headline (first text) and description (second text) in sequence.
     """
     js = r"""
     () => {
@@ -807,20 +805,65 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // PRIMARY: Target the exact class names from landscape image ads
-        const headlineEl = document.querySelector('.landscape-app-title');
-        if (headlineEl && isVisible(headlineEl)) {
-            let text = cleanText(headlineEl.innerText || headlineEl.textContent || '');
-            if (text.length > 1) {
-                headline = text;
-            }
-        }
+        // Step 1: Find the visible image/picture element
+        const images = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
+            const src = String(el.getAttribute('src') || '').toLowerCase();
+            const alt = String(el.getAttribute('alt') || '').toLowerCase();
+            if (src.includes('googlelogo') || alt.includes('google')) return false;
+            return isVisible(el);
+        });
 
-        const descriptionEl = document.querySelector('.landscape-app-text');
-        if (descriptionEl && isVisible(descriptionEl)) {
-            let text = cleanText(descriptionEl.innerText || descriptionEl.textContent || '');
-            if (text.length > 1 && text !== headline) {
-                description = text;
+        if (images.length > 0) {
+            const firstImage = images[0];
+            const imageRect = firstImage.getBoundingClientRect();
+            const imageBottom = imageRect.bottom;
+
+            // Step 2: Find all leaf text nodes (no children) that are visible
+            let allText = Array.from(document.querySelectorAll('*')).filter(el => {
+                if (el.childElementCount > 0) return false;
+                const txt = cleanText(el.innerText || el.textContent || '');
+                if (txt.length < 2 || txt.length > 220) return false;
+                if (txt.includes('{{') || txt.includes('}}')) return false;
+                if (!isVisible(el)) return false;
+                return true;
+            });
+
+            // Step 3: Filter text elements that appear BELOW the image
+            let textBelowImage = allText.filter(el => {
+                const rect = el.getBoundingClientRect();
+                return rect.top >= imageBottom - 10; // Allow small overlap
+            });
+
+            // Step 4: Sort by vertical position (top to bottom)
+            textBelowImage.sort((a, b) => {
+                const aRect = a.getBoundingClientRect();
+                const bRect = b.getBoundingClientRect();
+                return aRect.top - bRect.top;
+            });
+
+            // Step 5: Extract headline (first valid text below image)
+            for (let el of textBelowImage) {
+                let txt = cleanText(el.innerText || el.textContent || '');
+                if (txt.length >= 3 && txt.length <= 100 && 
+                    !txt.toLowerCase().includes('download') && 
+                    !txt.toLowerCase().includes('install') &&
+                    !txt.toLowerCase().includes('get')) {
+                    headline = txt;
+                    break;
+                }
+            }
+
+            // Step 6: Extract description (second valid text below image, different from headline)
+            for (let el of textBelowImage) {
+                let txt = cleanText(el.innerText || el.textContent || '');
+                if (txt.length >= 8 && txt.length <= 150 && 
+                    txt !== headline &&
+                    !txt.toLowerCase().includes('download') && 
+                    !txt.toLowerCase().includes('install') &&
+                    !txt.toLowerCase().includes('get')) {
+                    description = txt;
+                    break;
+                }
             }
         }
 
@@ -840,13 +883,13 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # 1) Check all iframes first for image ad details
+        # Check all iframes first for image ad details
         for frame in page.frames:
             data = read_target(frame)
             if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
                 return data
 
-        # 2) Then check main page
+        # Then check main page
         data = read_target(page)
         if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
             return data
@@ -854,7 +897,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-
 
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
