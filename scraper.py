@@ -1231,168 +1231,52 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-# =========================
-# IMAGE-AD EXTRACTION (NEW)
-# =========================
 
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """
-    Attempts to extract headline and description for image/display creatives by:
-    - Finding large visible image-like elements.
-    - Searching their parent / nearby sibling nodes for leaf text nodes.
-    - Picking the largest-font text as headline and the next-best as description.
-    - Explicitly ignores common CTA words like 'install', 'get', 'download' so the install button text isn't used as headline.
-    Returns (headline, description) where each is "N/A" when not found.
-    """
+    """Extract headline + description from IMAGE ads."""
     js = r"""
     () => {
-        const badWords = ['install','get','download','open','play','try','buy','install now'];
-        const cleanText = txt => (txt || '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-            if (rect.width <= 0 || rect.height <= 0) return false;
-            if (rect.bottom <= 0 || rect.right <= 0) return false;
-            if (rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
-            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-            return true;
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
-
-        const isImageLike = (el) => {
-            const tag = el.tagName.toLowerCase();
-            if (tag === 'img' || tag === 'canvas' || tag === 'svg' || tag === 'picture') {
-                const src = String(el.getAttribute('src') || '').toLowerCase();
-                const alt = String(el.getAttribute('alt') || '').toLowerCase();
-                if (src.includes('googlelogo') || alt.includes('google')) return false;
-                return isVisible(el);
-            }
-            return false;
-        };
-
-        // Return null if text candidate looks like an 'install' CTA or tiny
-        const validTextCandidate = (txt) => {
-            if (!txt) return false;
-            const t = cleanText(txt).toLowerCase();
-            if (t.length < 2 || t.length > 220) return false;
-            if (badWords.some(b => t === b || t.includes(b + ' ') || t.includes(' ' + b))) return false;
-            if (t.includes('{{') || t.includes('}}')) return false;
-            return true;
-        };
-
-        // Collect visible images sorted by area desc
-        const images = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(isImageLike);
-        images.sort((a,b) => {
-            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-            return (rb.width * rb.height) - (ra.width * ra.height);
+        let headline = "N/A";
+        let description = "N/A";
+        const allVisible = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4')).filter(el => {
+            const txt = cleanText(el.innerText || el.textContent);
+            return isVisible(el) && txt.length > 2;
         });
-
-        const scanAround = (el) => {
-            // Start at a useful ancestor (link/figure/section/article/div)
-            const ancestor = el.closest('a, figure, section, article, div, body') || document.body;
-            const candidates = new Map();
-
-            // leaf nodes under ancestor
-            for (let node of ancestor.querySelectorAll('*')) {
-                if (node.childElementCount > 0) continue;
-                if (!isVisible(node)) continue;
-                let txt = cleanText(node.innerText || node.textContent || '');
-                if (!validTextCandidate(txt)) continue;
-
-                // compute numeric font size for ranking
-                let style = window.getComputedStyle(node);
-                let font = parseFloat(style.fontSize || '0') || 0;
-
-                // also reward bold/strong styles a bit
-                if (style.fontWeight && (style.fontWeight === '700' || parseInt(style.fontWeight) >= 700)) {
-                    font += 1.5;
-                }
-                // position penalty for nodes far below
-                const rect = node.getBoundingClientRect();
-                let posScore = Math.max(0, 1 - (rect.top / (window.innerHeight || 1000)));
-                let score = font + posScore;
-                candidates.set(txt, Math.max(candidates.get(txt) || 0, score));
-            }
-
-            // If not enough under ancestor, try immediate sibling blocks
-            if (candidates.size < 2) {
-                let sibling = ancestor.nextElementSibling;
-                for (let step = 0; step < 3 && sibling; step++, sibling = sibling.nextElementSibling) {
-                    for (let node of sibling.querySelectorAll('*')) {
-                        if (node.childElementCount > 0) continue;
-                        if (!isVisible(node)) continue;
-                        let txt = cleanText(node.innerText || node.textContent || '');
-                        if (!validTextCandidate(txt)) continue;
-                        let style = window.getComputedStyle(node);
-                        let font = parseFloat(style.fontSize || '0') || 0;
-                        if (style.fontWeight && (style.fontWeight === '700' || parseInt(style.fontWeight) >= 700)) font += 1.5;
-                        let rect = node.getBoundingClientRect();
-                        let posScore = Math.max(0, 1 - (Math.abs(rect.top - ancestor.getBoundingClientRect().top) / (window.innerHeight || 1000)));
-                        let score = font + posScore;
-                        candidates.set(txt, Math.max(candidates.get(txt) || 0, score));
-                    }
-                }
-            }
-
-            if (candidates.size === 0) return null;
-
-            // convert map to sorted array by score desc and pick top two different texts
-            const arr = Array.from(candidates.entries()).map(([txt, score]) => ({txt, score}));
-            arr.sort((a,b) => b.score - a.score);
-
-            const headline = arr[0] ? arr[0].txt : "N/A";
-            const description = arr[1] ? arr[1].txt : "N/A";
-            return { headline, description };
-        };
-
-        for (let img of images) {
-            const found = scanAround(img);
-            if (found && (found.headline !== "N/A" || found.description !== "N/A")) {
-                return { headline: found.headline || "N/A", description: found.description || "N/A" };
-            }
+        for (const el of allVisible) {
+            const txt = cleanText(el.innerText || el.textContent);
+            if (txt.length >= 3 && txt.length <= 120 && txt.toLowerCase() !== "install" && txt.toLowerCase() !== "ad") { headline = txt; break; }
         }
-
-        // As last resort, do a broad visible-text scan but still reject install CTA
-        let best = "N/A", second = "N/A", bestScore = 0, secondScore = 0;
-        for (let el of Array.from(document.querySelectorAll('body *'))) {
-            if (el.childElementCount > 0) continue;
-            if (!isVisible(el)) continue;
-            let txt = cleanText(el.innerText || el.textContent || '');
-            if (!validTextCandidate(txt)) continue;
-            let style = window.getComputedStyle(el);
-            let font = parseFloat(style.fontSize || '0') || 0;
-            if (style.fontWeight && (style.fontWeight === '700' || parseInt(style.fontWeight) >= 700)) font += 1.5;
-            if (font > bestScore) { second = best; secondScore = bestScore; best = txt; bestScore = font; }
-            else if (font > secondScore) { second = txt; secondScore = font; }
+        for (const el of allVisible) {
+            const txt = cleanText(el.innerText || el.textContent);
+            if (txt.length >= 5 && txt.length <= 250 && txt !== headline && txt.toLowerCase() !== "install") { description = txt; break; }
         }
-
-        return { headline: best !== "N/A" ? best : "N/A", description: second !== "N/A" ? second : "N/A" };
+        return {headline, description};
     }
     """
-
     start = time.time()
     while time.time() - start < max_wait_seconds:
-        # try main page DOM first
         try:
-            result = page.evaluate(js)
-            if result and ((result.get("headline") and result.get("headline") != "N/A") or (result.get("description") and result.get("description") != "N/A")):
-                return clean_text(result.get("headline")), clean_text(result.get("description"))
+            data = page.evaluate(js)
+            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+                return data
         except Exception:
             pass
-
-        # then check frames
         for frame in page.frames:
             try:
-                result = frame.evaluate(js)
-                if result and ((result.get("headline") and result.get("headline") != "N/A") or (result.get("description") and result.get("description") != "N/A")):
-                    return clean_text(result.get("headline")), clean_text(result.get("description"))
+                data = frame.evaluate(js)
+                if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+                    return data
             except Exception:
                 continue
-
         page.wait_for_timeout(1000)
-
-    return "N/A", "N/A"
-
+    return {"headline":"N/A","description":"N/A"}
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1579,28 +1463,25 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-            headline = clean_text(text_data.get("headline"))
-            description = clean_text(text_data.get("description"))
+            is_image_like = has_visible_image_creative(page)
+
+            if is_image_like:
+                ad_data = wait_and_extract_image_ad_details(page, max_wait_seconds=15)
+            else:
+                ad_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
+
+            headline = clean_text(ad_data.get("headline"))
+            description = clean_text(ad_data.get("description"))
             process_time = get_exact_time()
             has_text = is_valid_text_ad(headline, description)
 
-            # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
-            is_image_like = has_visible_image_creative(page)
-
-            # NEW: If image-like and no text was detected, try image-specific extraction
-            if not has_text and is_image_like:
-                img_headline, img_description = wait_and_extract_image_ad_details(page, max_wait_seconds=8)
-                # Only accept non-CTA results
-                if img_headline != "N/A" or img_description != "N/A":
-                    headline = clean_text(img_headline)
-                    description = clean_text(img_description)
-                    has_text = is_valid_text_ad(headline, description)
-
-            ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
+            if is_image_like:
+                ad_type = "image"
+            else:
+                ad_type = "text" if has_text else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
