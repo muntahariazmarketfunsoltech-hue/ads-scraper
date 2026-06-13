@@ -711,14 +711,10 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 
 
 # =========================
-# NEW: IMPROVED IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (FIXED JS SYNTAX)
+# IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (fallback)
 # =========================
-
+# keep the image extractor as a lower-priority fallback (already present in your code)
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """
-    Improved image-ad extractor that prefers text near the creative or near an install link.
-    Returns (headline, description) or ("N/A","N/A")
-    """
     js = r"""
     () => {
         function clean(s){ return (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim(); }
@@ -733,7 +729,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
 
         function hasInstallNearby(el){
             try{
-                // search up ancestors
                 let anc = el;
                 for(let depth=0; depth<6 && anc; depth++, anc = anc.parentElement){
                     if(!anc) break;
@@ -749,7 +744,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                         }catch(e){}
                     }
                 }
-                // check nearby siblings
                 let prev = el.previousElementSibling;
                 for(let i=0;i<5 && prev;i++, prev=prev.previousElementSibling){
                     const anchors = Array.from(prev.querySelectorAll('a[href], button, [role="link"]'));
@@ -825,13 +819,11 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                 }
             }catch(e){}
 
-            // siblings
             let s = imgEl.previousElementSibling;
             for(let i=0;i<6 && s;i++, s=s.previousElementSibling) pushCandidate(s, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
             s = imgEl.nextElementSibling;
             for(let i=0;i<6 && s;i++, s=s.nextElementSibling) pushCandidate(s, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
 
-            // ancestor search
             let anc = imgEl.parentElement;
             for(let depth=0; depth<5 && anc; depth++, anc = anc.parentElement){
                 try{
@@ -842,7 +834,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                 }catch(e){}
             }
 
-            // unique + sort
             const uniq = {};
             const out = [];
             for(let c of candidates){
@@ -862,7 +853,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             return out;
         }
 
-        // find visible image elements
         const imgs = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el=>{
             try{
                 const rect = el.getBoundingClientRect();
@@ -903,7 +893,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     start = time.time()
     end = start + max_wait_seconds
 
-    # Try top-ranked frames first
     try:
         ranked = get_ranked_non_video_targets(page)
     except Exception:
@@ -923,7 +912,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         except Exception:
             continue
 
-    # fallback: page + frames scan
     while time.time() < end:
         try:
             res = page.evaluate(js)
@@ -1332,7 +1320,7 @@ def _score_non_video_target(target):
         });
 
         const descNodes = Array.from(document.querySelectorAll(
-            '[class*="-e-67"], [class*="long-description"], [class*="description"], [aria-label*="Description"], [aria-label*="description"]'
+            '[class*="-e-67"], [class*="long-description"], [class*="description'], [aria-label*="Description"], [aria-label*="description"]'
         )).filter(el => {
             const txt = cleanText(el.innerText || el.textContent || '');
             return txt.length >= 8 && txt.length <= 260 && isVisible(el) && !txt.includes('{{');
@@ -1716,31 +1704,46 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
-            # If image-like but no text found by text-ad extractor, try the image-ad extractor
+            # NEW: For image-like creatives, first use exactly the same text-ad extraction
+            # method used for text creatives (iframe-first selectors). Fallback to image
+            # heuristic only if that fails.
             if not has_text and is_image_like:
-                # try targeted frames and page (improved extractor handles ranked frames)
-                img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
-                img_head = clean_text(img_head)
-                img_desc = clean_text(img_desc)
-
-                # DEBUG log the candidates so you can inspect Row-level output
-                try:
-                    if img_head != "N/A" or img_desc != "N/A":
-                        safe_add_log(
-                            row_number=row_num,
-                            status="IMAGE_TEXT_CANDIDATE",
-                            log_type="IMAGE_AD",
-                            url=url,
-                            message=f"img_head='{img_head}' img_desc='{img_desc}'"
-                        )
-                except Exception:
-                    pass
+                # 1) try the text-ad extractor (same method used for text ads)
+                img_text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
+                img_head = clean_text(img_text_data.get("headline"))
+                img_desc = clean_text(img_text_data.get("description"))
 
                 if is_valid_text_ad(img_head, img_desc):
                     headline = img_head
                     description = img_desc
                     has_text = True
-                    print(f"🖼 Row {row_num}: extracted text from image ad -> {headline} | {description}")
+                    print(f"🖼 Row {row_num}: image ad -> extracted via text-ad method: {headline} | {description}")
+                else:
+                    # 2) fallback to the image-specific extractor (shorter timeout)
+                    img_head2, img_desc2 = wait_and_extract_image_ad_details(page, max_wait_seconds=6)
+                    img_head2 = clean_text(img_head2)
+                    img_desc2 = clean_text(img_desc2)
+
+                    # DEBUG log the candidate from image extractor
+                    try:
+                        if img_head2 != "N/A" or img_desc2 != "N/A":
+                            safe_add_log(
+                                row_number=row_num,
+                                status="IMAGE_TEXT_CANDIDATE",
+                                log_type="IMAGE_AD",
+                                url=url,
+                                message=f"img_head='{img_head2}' img_desc='{img_desc2}' (fallback image extractor)"
+                            )
+                    except Exception:
+                        pass
+
+                    if is_valid_text_ad(img_head2, img_desc2):
+                        headline = img_head2
+                        description = img_desc2
+                        has_text = True
+                        print(f"🖼 Row {row_num}: image ad -> extracted via image heuristic fallback: {headline} | {description}")
+                    else:
+                        print(f"🖼 Row {row_num}: image ad -> no headline/description found by text-ad method or image fallback")
 
             # Resolve package: first from visible install link (same as before)
             if visible_package != "N/A":
