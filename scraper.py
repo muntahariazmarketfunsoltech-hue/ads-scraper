@@ -1,13 +1,6 @@
-# ============================================================================
-# COMPLETE GOOGLE ADS TRANSPARENCY SCRAPER - UPDATED
-# Features:
-#   - Cache clearing (Playwright, Chromium, cookies, storage)
-#   - 0.76 strict package matching threshold
-#   - Video ad detection (original logic)
-#   - Text/Image ad extraction
-#   - Parallel processing (ThreadPoolExecutor)
-#   - Thread-safe Google Sheets updates
-# ============================================================================
+# Combined Google Ads Transparency scraper
+# Video-ad detection logic is kept from the original scrapper.txt.
+# Non-video ads use text/image extraction + package matching from the uploaded non-video files.
 
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs, unquote
@@ -15,17 +8,37 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import difflib
 import re
+
+def get_best_matching_package_for_text_ad(headline, description, package_list, min_score=0.70):
+    """Matches package names with headline + description using character-level comparison."""
+    import difflib
+    def clean_text_for_comparison(text):
+        if not text or text == "N/A":
+            return ""
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    ad_text = clean_text_for_comparison(str(headline) + str(description))
+
+    best_pkg = None
+    best_score = 0.0
+
+    for pkg in package_list:
+        pkg_clean = clean_text_for_comparison(pkg)
+        if not pkg_clean:
+            continue
+        ratio = difflib.SequenceMatcher(None, ad_text, pkg_clean).ratio()
+        if ratio > best_score:
+            best_score = ratio
+            best_pkg = pkg
+
+    if best_score >= min_score:
+        return best_pkg, best_score
+    return None, best_score
+
 import time
 import threading
-import shutil
-import os
-
-# Import your sheets module
 import sheets
 
-# =========================
-# CONFIGURATION
-# =========================
 
 MAX_WORKERS = 2
 SHEET_LOCK = threading.Lock()
@@ -41,70 +54,6 @@ INSTALL_SELECTORS = [
     'a:has-text("Download")',
 ]
 
-# STRICT THRESHOLD FOR PACKAGE MATCHING
-MIN_PACKAGE_MATCH_SCORE = 0.76
-
-_GENERIC_PACKAGE_TOKENS = {
-    "com", "net", "org", "co", "io", "app", "apps", "android", "mobile",
-    "google", "play", "store", "free", "pro", "lite", "online", "official",
-    "inc", "ltd", "llc", "studio", "studios", "company", "group", "digital",
-    "ai", "all", "new", "best", "easy", "fast"
-}
-
-# =========================
-# CACHE CLEARING UTILITIES
-# =========================
-
-def clear_playwright_cache():
-    """Clear Playwright browser cache and data."""
-    cache_dirs = [
-        os.path.expanduser("~/.cache/ms-playwright"),
-        os.path.expanduser("~/.cache/chromium"),
-        os.path.expanduser("~/AppData/Local/Temp/playwright"),
-    ]
-    
-    cleared = []
-    for cache_dir in cache_dirs:
-        if os.path.exists(cache_dir):
-            try:
-                shutil.rmtree(cache_dir)
-                cleared.append(f"✓ Cleared: {cache_dir}")
-            except Exception as e:
-                cleared.append(f"✗ Failed to clear {cache_dir}: {str(e)[:50]}")
-    
-    return cleared
-
-
-def clear_browser_context_cache(context):
-    """Clear all cookies, storage, and cache from browser context."""
-    try:
-        context.clear_cookies()
-    except Exception as e:
-        pass
-    
-    try:
-        context.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-    except Exception as e:
-        pass
-
-
-def clear_all_caches():
-    """Full cache clearing before scraping starts."""
-    print("\n" + "=" * 70)
-    print("🧹 CACHE CLEARING STARTED")
-    print("=" * 70)
-    
-    results = clear_playwright_cache()
-    for result in results:
-        print(result)
-    
-    print("\nNote: Browser context cache will be cleared per page")
-    print("=" * 70 + "\n")
-
-
-# =========================
-# THREAD-SAFE SHEET UPDATES
-# =========================
 
 def safe_update_combined_row(row_num, data):
     """
@@ -139,10 +88,6 @@ def safe_add_log(row_number, status, log_type, url="", video_id="", app_link="",
         )
 
 
-# =========================
-# UTILITY FUNCTIONS
-# =========================
-
 def get_exact_time():
     return datetime.now().strftime("%I:%M:%S %p")
 
@@ -173,10 +118,12 @@ def extract_package_name(app_link):
         
         # Apple App Store format: ...app/app-name/id123456789
         if "apps.apple.com" in app_link.lower():
+            # Extract the ID from the URL path
             match = re.search(r"/id(\d+)", app_link)
             if match:
                 return f"id{match.group(1)}"
         
+        # If we can't extract, return N/A
         return "N/A"
     
     except Exception:
@@ -184,7 +131,7 @@ def extract_package_name(app_link):
 
 
 # =========================
-# VIDEO ID LOGIC (ORIGINAL)
+# VIDEO ID LOGIC (REVERTED TO YOUR ORIGINAL WORKING LOGIC)
 # =========================
 
 def is_real_video_response(response):
@@ -701,6 +648,7 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
         let headText = "N/A";
         let descText = "N/A";
 
+        // Helper to ensure we don't grab hidden/template elements
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
@@ -708,10 +656,12 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
             return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
 
+        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
         const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
         for (let el of headNodes) {
             if (isVisible(el)) {
                 let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                // Ensure it's not a template placeholder like {{headline}}
                 if (text.length > 1 && !text.includes('{{')) { 
                     headText = text; 
                     break; 
@@ -719,6 +669,7 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
             }
         }
 
+        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
         const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
         for (let el of descNodes) {
             if (isVisible(el)) {
@@ -730,6 +681,7 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
             }
         }
 
+        // If we found either one, return it
         if (headText !== "N/A" || descText !== "N/A") {
             return { headline: headText, description: descText };
         }
@@ -740,8 +692,10 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 
     start = time.time()
     
+    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
     while time.time() - start < max_wait_seconds:
         
+        # STRICTLY CHECK IFRAMES ONLY.
         for frame in page.frames:
             try:
                 result = frame.evaluate(js)
@@ -750,8 +704,10 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
             except Exception:
                 continue
         
+        # Wait 1 second and loop again to let the ad iframe fully load
         page.wait_for_timeout(1000)
 
+    # If the timer runs out, return N/A
     return "N/A", "N/A"
 
 
@@ -761,12 +717,13 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
     - Prefers visible elements from the active creative (main DOM).
     - Uses specific selectors: <div role="link">, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic
     - Falls back to iframe if necessary.
-    - Relaxed visibility check to allow offscreen or special-language creatives.
+    - Relaxed visibility check to allow offscreen or special-language creatives (e.g., Arabic).
     """
     js = r"""
     () => {
         const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
+        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
@@ -780,6 +737,7 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
+        // 1️⃣ Main visible creative first
         const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
         if (headlineEl && isVisible(headlineEl)) {
             headline = cleanText(headlineEl.innerText || headlineEl.textContent);
@@ -806,10 +764,12 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
+        # 1) Check main page DOM first (active visible creative)
         data = read_target(page)
         if data:
             return data
 
+        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
@@ -821,33 +781,41 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
+# =========================
+# STRICT TEXT-AD PACKAGE MATCHER
+# =========================
 
-# =========================
-# ENHANCED 0.76 PACKAGE MATCHING
-# =========================
+MIN_PACKAGE_MATCH_SCORE = 0.76
+
+_GENERIC_PACKAGE_TOKENS = {
+    "com", "net", "org", "co", "io", "app", "apps", "android", "mobile",
+    "google", "play", "store", "free", "pro", "lite", "online", "official",
+    "inc", "ltd", "llc", "studio", "studios", "company", "group", "digital",
+    "ai", "all", "new", "best", "easy", "fast"
+}
+
 
 def clean_text_for_comparison(text):
-    """Lowercase and remove punctuation/spaces for comparison."""
+    """Lowercase and remove punctuation/spaces for ad text vs package comparison."""
     if not text or text == "N/A":
         return ""
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
 def split_words_for_comparison(text):
-    """Extract alphanumeric words from text."""
     if not text or text == "N/A":
         return []
     return re.findall(r"[a-z0-9]+", str(text).lower())
 
 
 def package_tokens_for_matching(pkg):
-    """Extract meaningful tokens from package name."""
+    """Turn com.example.musicplayer into useful tokens like example/musicplayer."""
     if not pkg:
         return []
-    
+
     raw_tokens = re.split(r"[._-]+", pkg.lower())
     tokens = []
-    
+
     for token in raw_tokens:
         token = re.sub(r"[^a-z0-9]", "", token)
         if not token or token in _GENERIC_PACKAGE_TOKENS:
@@ -855,81 +823,72 @@ def package_tokens_for_matching(pkg):
         if len(token) < 3 or token.isdigit():
             continue
         tokens.append(token)
-    
+
     return tokens
 
 
 def score_package_against_text(pkg, headline, description):
     """
-    STRICT 0.76 threshold scoring for package matching.
-    
-    Scoring levels:
-    - 0.98: Package core found directly in visible ad text
-    - 0.92: 2+ exact token matches
-    - 0.82: High sequence similarity (88%+) on long core
-    - 0.78: 1 long exact token match (8+ chars)
-    - 0.76: 2+ total hits (exact + partial) - MINIMUM PASS
-    - Below 0.76: No match
+    STRICT score for non-video ads: compare package ONLY with visible headline + description.
+    This prevents image ads from using random hidden package names from the page HTML.
     """
     visible_raw = f"{headline or ''} {description or ''}"
     visible_clean = clean_text_for_comparison(visible_raw)
     visible_words = split_words_for_comparison(visible_raw)
     visible_word_set = set(visible_words)
-    
+
     if not visible_clean or not visible_words:
         return 0.0
-    
+
     tokens = package_tokens_for_matching(pkg)
     if not tokens:
         return 0.0
-    
+
     package_core = "".join(tokens)
     score = 0.0
-    
-    # Signal 1: Package core found directly in visible text (very strong)
+
+    # Very strong signal: useful package core appears directly in visible ad text.
     if package_core and len(package_core) >= 6 and package_core in visible_clean:
         score = max(score, 0.98)
-        return round(score, 4)
-    
-    # Count exact and partial token matches
+
+    # Direct token hits only. Generic tokens were already removed by package_tokens_for_matching().
     exact_hits = []
     partial_hits = []
-    
+
     for token in tokens:
-        # Exact word match
         if token in visible_word_set:
             exact_hits.append(token)
             continue
-        
-        # Long token substring match in concatenated visible text
+
+        # Allow long tokens like musicplayer/pdfreader to match joined visible text.
         if len(token) >= 6 and token in visible_clean:
             exact_hits.append(token)
             continue
-        
-        # Partial match: token within visible word or vice versa
+
         for word in visible_words:
             if len(token) >= 5 and len(word) >= 5 and (token in word or word in token):
                 partial_hits.append(token)
                 break
-    
+
     exact_hits = list(dict.fromkeys(exact_hits))
     partial_hits = list(dict.fromkeys(partial_hits))
     total_hits = len(set(exact_hits + partial_hits))
-    
-    # Scoring rules for 0.76+ threshold
+
+    # One weak/fuzzy word is NOT enough now. This is the main image-ad false-match fix.
     if len(exact_hits) >= 2:
-        score = max(score, 0.92)  # 2+ exact matches = strong match
+        score = max(score, 0.92)
     elif len(exact_hits) == 1 and len(exact_hits[0]) >= 8:
-        score = max(score, 0.78)  # 1 long exact match (8+ chars)
+        score = max(score, 0.78)
     elif total_hits >= 2:
-        score = max(score, 0.76)  # 2+ total hits (exact + partial) = minimum threshold
-    
-    # Fuzzy matching on package core only if it's long enough
+        score = max(score, 0.76)
+
+    # Fuzzy matching can only boost when the whole package core is extremely close.
+    # It cannot pass alone on one random similar word.
     if package_core and len(package_core) >= 8:
         core_ratio = difflib.SequenceMatcher(None, visible_clean, package_core).ratio()
         if core_ratio >= 0.88:
             score = max(score, 0.82)
-    
+
     return round(score, 4)
 
 
@@ -943,43 +902,17 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
 
     best_pkg = None
     best_score = 0.0
-    match_details = []
 
     for pkg in sorted(package_list):
         score = score_package_against_text(pkg, headline, description)
-        
-        match_details.append({
-            "package": pkg,
-            "score": score,
-            "meets_threshold": score >= min_score
-        })
-        
         if score > best_score:
             best_score = score
             best_pkg = pkg
 
-    # Sort by score for logging
-    match_details.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Log top 5 matches for debugging
-    print(f"\n📊 PACKAGE MATCHING RESULTS (Threshold: {min_score})")
-    print("=" * 70)
-    print(f"Headline: {headline[:60]}")
-    print(f"Description: {description[:60]}")
-    print(f"Total packages evaluated: {len(package_list)}")
-    print("\nTop matches:")
-    for i, match in enumerate(match_details[:5], 1):
-        status = "✓ PASS" if match["meets_threshold"] else "✗ FAIL"
-        print(f"  {i}. {match['package']:<45} | {match['score']:.4f} [{status}]")
-    print("=" * 70)
-    
     if best_pkg and best_score >= min_score:
-        print(f"✅ MATCHED: {best_pkg} with score {best_score:.4f}\n")
         return best_pkg, best_score
-    else:
-        print(f"❌ NO MATCH: Best score {best_score:.4f} below threshold {min_score}\n")
-        return None, best_score
 
+    return None, best_score
 
 def decode_all(text):
     """Decode every encoding variant so no package name is missed."""
@@ -1010,20 +943,15 @@ _SKIP_PFX = re.compile(
     r'com\.squareup\.|io\.reactivex\.|okhttp3\.|javax\.|java\.|'
     r'org\.json\.|org\.apache\.)', re.I)
 
-
 def _is_valid_pkg(pkg):
     parts = pkg.split('.')
-    if len(parts) < 3 or len(pkg) < 8:
-        return False
-    if _SKIP_EXT.search(pkg):
-        return False
-    if _SKIP_PFX.match(pkg):
-        return False
+    if len(parts) < 3 or len(pkg) < 8:  return False
+    if _SKIP_EXT.search(pkg):            return False
+    if _SKIP_PFX.match(pkg):             return False
     for p in parts:
         if not p or not re.match(r'^[A-Za-z][A-Za-z0-9_]*$', p):
             return False
     return True
-
 
 def extract_packages_from_text(raw_text):
     """Returns a SET of all unique, valid package names found in the text."""
@@ -1046,7 +974,6 @@ def extract_packages_from_text(raw_text):
                 candidates.add(pkg)
 
     return candidates
-
 
 def extract_package_from_page(page):
     """
@@ -1096,7 +1023,6 @@ def extract_package_from_page(page):
     combined = '\n'.join(collected_texts)
     return extract_packages_from_text(combined)
 
-
 def extract_advertiser_from_page(page):
     try:
         loc = page.locator('.advertiser-title, [data-test-id="advertiser-name"]').first
@@ -1120,6 +1046,7 @@ def extract_advertiser_from_page(page):
             if (txt.length < 2 || txt.length > 60 || badWords.some(b => lower.includes(b))) continue;
 
             let rect = el.getBoundingClientRect();
+            // Strict visual bounds check
             if (rect.width === 0 || rect.height === 0 || rect.y < 0 || rect.y > 350 || rect.width < 10) continue;
 
             let style = window.getComputedStyle(el);
@@ -1135,17 +1062,15 @@ def extract_advertiser_from_page(page):
     }
     """
     try:
-        if advertiser := page.evaluate(js): 
-            return advertiser
+        if advertiser := page.evaluate(js): return advertiser
     except Exception:
         pass
     return "N/A"
 
-
 def _frame_parent_box(frame):
     """
     Returns the iframe element box in the parent page.
-    Important because hidden/stale iframe can still return text from inside.
+    This is important because a hidden/stale iframe can still return text from inside itself.
     """
     try:
         iframe_el = frame.frame_element()
@@ -1159,8 +1084,8 @@ def _frame_parent_box(frame):
 
 def _score_non_video_target(target):
     """
-    Scores a page/frame by checking if it looks like the active ad creative.
-    Higher score = more likely to be current transparency URL preview.
+    Scores a page/frame by checking whether it looks like the active ad creative.
+    Higher score = more likely to be the current transparency URL preview.
     """
     js = r"""
     () => {
@@ -1233,6 +1158,7 @@ def _score_non_video_target(target):
         score += Math.min(imageNodes.length, 3) * 25;
         score += Math.min(leafTextNodes.length, 8) * 8;
 
+        // The Google transparency shell/page chrome should not beat the actual creative iframe.
         if (lowerText.includes('ads transparency center') || lowerText.includes('ads transparency centre')) score -= 180;
         if (lowerText.includes('see more ads') || lowerText.includes('report this ad')) score -= 90;
         if (lowerText.includes('last shown') || lowerText.includes('shown in')) score -= 50;
@@ -1256,7 +1182,8 @@ def _score_non_video_target(target):
 
 def get_ranked_non_video_targets(page):
     """
-    Returns frames/page ordered by most likely active creative.
+    Returns frames/page ordered by the most likely active creative.
+    Old logic checked page.frames in browser order, which can be wrong for repeated ads.
     """
     ranked = []
 
@@ -1273,11 +1200,13 @@ def get_ranked_non_video_targets(page):
             y = box.get("y", 99999) or 99999
             area = width * height
 
+            # Active ad preview iframe is normally visible and reasonably large.
             if width >= 120 and height >= 70:
                 parent_bonus += min(area / 8000, 80)
             else:
                 parent_bonus -= 120
 
+            # Prefer currently visible/near-top preview, not repeated ads farther down the page.
             if -50 <= y <= 900:
                 parent_bonus += 80
             elif 900 < y <= 1400:
@@ -1293,6 +1222,7 @@ def get_ranked_non_video_targets(page):
         if final_score > 0:
             ranked.append((final_score, frame, "iframe", inner))
 
+    # Main page is only a fallback. It contains Google page chrome, so keep it below real creative frames.
     main_inner = _score_non_video_target(page)
     main_score = float(main_inner.get("score", 0) or 0) - 60
     if main_score > 0:
@@ -1301,9 +1231,8 @@ def get_ranked_non_video_targets(page):
     ranked.sort(key=lambda item: item[0], reverse=True)
     return ranked
 
-
 # =========================
-# AD TYPE DETECTION
+# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS + IMAGE ADS
 # =========================
 
 def is_valid_text_ad(headline, description):
@@ -1312,7 +1241,6 @@ def is_valid_text_ad(headline, description):
     if description and description != "N/A" and len(clean_text(description)) >= 15:
         return True
     return False
-
 
 def has_visible_image_creative(page):
     """
@@ -1371,10 +1299,6 @@ def has_visible_image_creative(page):
     return False
 
 
-# =========================
-# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS + IMAGE ADS
-# =========================
-
 def scrape_single_url(url_row):
     row_num, url = url_row
 
@@ -1399,13 +1323,10 @@ def scrape_single_url(url_row):
             )
         )
 
-        # CLEAR CACHE FOR THIS CONTEXT
-        clear_browser_context_cache(context)
-
         page = context.new_page()
         captured = {"video_id": "N/A"}
 
-        # ORIGINAL VIDEO RESPONSE HANDLER
+        # ORIGINAL VIDEO RESPONSE HANDLER - kept unchanged.
         def handle_response(response):
             try:
                 if not is_real_video_response(response):
@@ -1441,12 +1362,12 @@ def scrape_single_url(url_row):
 
             advertiser = extract_advertiser_from_page(page)
 
-            # VIDEO LOGIC: same original flow
+            # VIDEO LOGIC: same original flow. No text/image extraction runs before this.
             video_id = detect_video_id(page, captured)
             video_time = get_exact_time()
 
             # =========================
-            # VIDEO AD PATH
+            # VIDEO AD PATH (UNCHANGED)
             # =========================
             if video_id != "N/A":
                 print(f"🎬 Row {row_num}: video ID found first: {video_id}")
@@ -1471,7 +1392,7 @@ def scrape_single_url(url_row):
                     url,
                     app_link,
                     app_link_time,
-                    video_id,
+                    video_id,      # Column F: actual video ID for video ads
                     video_time
                 ]
 
@@ -1496,14 +1417,14 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            # Extract headline/description
+            # Try to extract headline/description using the relaxed extractor for both text and image ads
             text_data = wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15)
             headline = clean_text(text_data.get("headline"))
             description = clean_text(text_data.get("description"))
             process_time = get_exact_time()
             has_text = is_valid_text_ad(headline, description)
 
-            # Try visible install/app link
+            # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
@@ -1542,7 +1463,7 @@ def scrape_single_url(url_row):
             else:
                 print(f"🖼 Row {row_num}: image ad detected")
 
-            # Extract packages from page
+            # Try to extract package from page
             print(f"📦 Row {row_num}: extracting packages from page...")
             all_found_packages = extract_package_from_page(page)
 
@@ -1562,9 +1483,9 @@ def scrape_single_url(url_row):
                 print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
 
             elif has_text and all_found_packages:
-                # Priority 2: Strict matching for text ads (0.76 threshold)
+                # Priority 2: Strict matching for text ads or image ads with extracted text
                 print(f"📦 Row {row_num}: strict matching headline + description against {len(all_found_packages)} packages (threshold 0.76)")
-                matched_pkg, score = get_best_matching_package(headline, description, all_found_packages, min_score=MIN_PACKAGE_MATCH_SCORE)
+                matched_pkg, score = get_best_matching_package(headline, description, all_found_packages)
                 
                 if matched_pkg and score >= MIN_PACKAGE_MATCH_SCORE:
                     package_name = matched_pkg
@@ -1594,11 +1515,12 @@ def scrape_single_url(url_row):
                 url,
                 app_link,
                 process_time,
-                ad_type,
+                ad_type,      # Column F: text/image for non-video ads
                 process_time
             ]
 
             safe_update_combined_row(row_num, data)
+            # Update headline/description for ALL non-video ads (text and image)
             safe_update_headline_desc(row_num, headline, description)
 
             safe_add_log(
@@ -1649,13 +1571,7 @@ def scrape_single_url(url_row):
             context.close()
             browser.close()
 
-
-def run_parallel_combined_scraper(max_workers=MAX_WORKERS):
-    """Main entry point - clears cache and starts parallel scraping."""
-    
-    # CLEAR ALL CACHES FIRST
-    clear_all_caches()
-    
+def run_parallel_combined_scraper(max_workers=2):
     urls = sheets.get_urls_with_retry()
 
     url_rows = [
@@ -1670,7 +1586,6 @@ def run_parallel_combined_scraper(max_workers=MAX_WORKERS):
 
     print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
-    print(f"📊 Package matching threshold: {MIN_PACKAGE_MATCH_SCORE}\n")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -1696,9 +1611,7 @@ def run_parallel_combined_scraper(max_workers=MAX_WORKERS):
                 except Exception:
                     pass
 
-    print("\n" + "=" * 70)
     print("✅ Finished combined video + text + image scraping")
-    print("=" * 70)
 
 
 if __name__ == "__main__":
