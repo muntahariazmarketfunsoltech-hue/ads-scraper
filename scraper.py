@@ -783,83 +783,74 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Uses the SAME LOGIC as wait_and_extract_text_ad_details_relaxed.
-    Searches for text elements within the creative, avoiding logs and page chrome.
+    Simpler approach: find all visible text, sort by position, take first two.
     """
     js = r"""
     () => {
         const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
-        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return false;
             const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
+            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+            return true;
         };
 
-        let headline = "N/A";
-        let description = "N/A";
-
-        // 1️⃣ For IMAGE ADS: Find the creative container with image
-        // Look for containers that have both image and text elements
-        const creativeContainers = Array.from(document.querySelectorAll('div[role="article"], div[role="link"], section, article')).filter(el => {
-            // Must have an image inside
-            const hasImage = el.querySelector('img, picture, canvas, svg');
-            return hasImage && isVisible(el);
+        // Get ALL visible text content on page
+        let textElements = [];
+        
+        document.querySelectorAll('*').forEach(el => {
+            // Skip if has children elements (only leaf nodes)
+            if (el.children.length > 0) return;
+            
+            const txt = cleanText(el.textContent || '');
+            if (txt.length < 2 || txt.length > 300) return;
+            
+            // Skip hidden content
+            if (!isVisible(el)) return;
+            
+            // Skip special markers
+            if (txt.includes('{{') || txt.includes('}}')) return;
+            
+            textElements.push({
+                text: txt,
+                y: el.getBoundingClientRect().top,
+                x: el.getBoundingClientRect().left
+            });
         });
 
-        if (creativeContainers.length > 0) {
-            const container = creativeContainers[0]; // Use first creative container
+        // Sort by Y position (top to bottom), then X position
+        textElements.sort((a, b) => {
+            if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
+            return a.x - b.x;
+        });
 
-            // 2️⃣ Find all text nodes within this container (but not nested too deep)
-            const allTextNodes = Array.from(container.querySelectorAll('span, p, div')).filter(el => {
-                // Only leaf elements with actual text
-                if (el.childElementCount > 0 && el.querySelector('img, picture')) return false;
-                
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length < 2) return false;
-                if (txt.includes('{{') || txt.includes('}}')) return false;
-                
-                // Skip log entries and status text
-                if (txt.toLowerCase().includes('agent_')) return false;
-                if (txt.toLowerCase().includes('claimed')) return false;
-                if (txt.toLowerCase().includes('done')) return false;
-                if (txt.toLowerCase().includes('install')) return false;
-                if (txt.toLowerCase().includes('download')) return false;
-                
-                return isVisible(el);
-            });
+        // Find first 2 valid text elements
+        let headline = "N/A";
+        let description = "N/A";
+        let found = 0;
 
-            // 3️⃣ Sort by position (top to bottom)
-            allTextNodes.sort((a, b) => {
-                const aRect = a.getBoundingClientRect();
-                const bRect = b.getBoundingClientRect();
-                if (Math.abs(aRect.top - bRect.top) > 5) {
-                    return aRect.top - bRect.top; // Different rows: sort by vertical position
-                }
-                return aRect.left - bRect.left; // Same row: sort by horizontal position
-            });
-
-            // 4️⃣ Extract headline (first text, typically shorter)
-            for (let el of allTextNodes) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 3 && txt.length <= 100) {
-                    headline = txt;
-                    break;
-                }
-            }
-
-            // 5️⃣ Extract description (second text, typically longer, different from headline)
-            for (let el of allTextNodes) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 8 && txt.length <= 200 && txt !== headline) {
-                    description = txt;
-                    break;
-                }
+        for (let elem of textElements) {
+            const txt = elem.text;
+            
+            // Skip single words or very short text
+            if (txt.split(' ').length < 2 && txt.length < 15) continue;
+            
+            // Skip obvious non-ad text
+            if (txt.toLowerCase().includes('sign in')) continue;
+            if (txt.toLowerCase().includes('log in')) continue;
+            if (txt.toLowerCase().includes('home')) continue;
+            if (txt.toLowerCase().includes('help')) continue;
+            
+            if (found === 0 && txt.length <= 120) {
+                headline = txt;
+                found++;
+            } else if (found === 1 && txt !== headline && txt.length <= 200) {
+                description = txt;
+                found++;
+                break;
             }
         }
 
@@ -873,24 +864,22 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
                 return data
         except Exception:
-            return None
+            pass
         return None
 
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # 1) Check main page DOM first (active visible creative)
-        data = read_target(page)
-        if data:
-            return data
-
-        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
+        # Check iframes first
         for frame in page.frames:
-            if frame == page.main_frame:
-                continue
             data = read_target(frame)
             if data:
                 return data
+
+        # Then main page
+        data = read_target(page)
+        if data:
+            return data
 
         page.wait_for_timeout(1000)
 
