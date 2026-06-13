@@ -711,7 +711,7 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
     return "N/A", "N/A"
 
 # =========================
-# STRICT TEXT-AD PACKAGE MATCHER
+# STRICT TEXT-AD PACKAGE MATCHER (MADE MORE FORGIVING)
 # =========================
 
 MIN_PACKAGE_MATCH_SCORE = 0.76
@@ -760,6 +760,7 @@ def score_package_against_text(pkg, headline, description):
     """
     STRICT score for non-video ads: compare package ONLY with visible headline + description.
     This prevents image ads from using random hidden package names from the page HTML.
+    Added: a single long token match in visible text now grants a high score.
     """
     visible_raw = f"{headline or ''} {description or ''}"
     visible_clean = clean_text_for_comparison(visible_raw)
@@ -780,7 +781,7 @@ def score_package_against_text(pkg, headline, description):
     if package_core and len(package_core) >= 6 and package_core in visible_clean:
         score = max(score, 0.98)
 
-    # Direct token hits only. Generic tokens were already removed by package_tokens_for_matching().
+    # Direct token hits only.
     exact_hits = []
     partial_hits = []
 
@@ -803,7 +804,7 @@ def score_package_against_text(pkg, headline, description):
     partial_hits = list(dict.fromkeys(partial_hits))
     total_hits = len(set(exact_hits + partial_hits))
 
-    # One weak/fuzzy word is NOT enough now. This is the main image-ad false-match fix.
+    # Existing strict rules
     if len(exact_hits) >= 2:
         score = max(score, 0.92)
     elif len(exact_hits) == 1 and len(exact_hits[0]) >= 8:
@@ -811,8 +812,13 @@ def score_package_against_text(pkg, headline, description):
     elif total_hits >= 2:
         score = max(score, 0.76)
 
-    # Fuzzy matching can only boost when the whole package core is extremely close.
-    # It cannot pass alone on one random similar word.
+    # New: single exact token match of reasonable length should be allowed (helps single-word creatives)
+    for t in exact_hits:
+        if len(t) >= 5:
+            score = max(score, 0.78)
+            break
+
+    # Fuzzy matching can boost when the whole package core is close.
     if package_core and len(package_core) >= 8:
         core_ratio = difflib.SequenceMatcher(None, visible_clean, package_core).ratio()
         if core_ratio >= 0.88:
@@ -824,7 +830,7 @@ def score_package_against_text(pkg, headline, description):
 def get_best_matching_package(headline, description, package_list, min_score=MIN_PACKAGE_MATCH_SCORE):
     """
     Compare headline + description with every found package.
-    Returns (package, score). If no package score is at least 0.76, returns (None, best_score).
+    Returns (package, score). If no package score is at least MIN_PACKAGE_MATCH_SCORE, returns (None, best_score).
     """
     if not package_list:
         return None, 0.0
@@ -873,8 +879,10 @@ _SKIP_PFX = re.compile(
     r'org\.json\.|org\.apache\.)', re.I)
 
 def _is_valid_pkg(pkg):
+    # relaxed: allow 2-part packages (e.g., example.app) and shorter (>=6 chars),
+    # but still filter out known SDK/internal prefixes and extensions
     parts = pkg.split('.')
-    if len(parts) < 3 or len(pkg) < 8:  return False
+    if len(parts) < 2 or len(pkg) < 6:  return False
     if _SKIP_EXT.search(pkg):            return False
     if _SKIP_PFX.match(pkg):             return False
     for p in parts:
@@ -889,15 +897,23 @@ def extract_packages_from_text(raw_text):
 
     patterns = [
         r"""['"]appId['"]\s*:\s*['"]([A-Za-z][\w.]+)['"]""",
-        r"""play\.google\.com/store/apps/details[^\s'"<>]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
-        r"""market://[^\s'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
-        r"""(?:destination_url|final_url|click_url|destUrl|clickUrl|landingUrl)['"\s]*:['"\s]*['"][^'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
-        r"""[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
-        r"""[?&]package=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})"""
+        r"""play\.google\.com/store/apps/details[^\s'"<>]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})""",
+        r"""market://[^\s'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})""",
+        r"""(?:destination_url|final_url|click_url|destUrl|clickUrl|landingUrl)['"\s]*:['"\s]*['"][^'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})""",
+        r"""[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})""",
+        r"""[?&]package=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})"""
     ]
 
     for pat in patterns:
         for m in re.finditer(pat, text, re.IGNORECASE):
+            pkg = m.group(1).rstrip('.,;\'"\\ ')
+            if _is_valid_pkg(pkg):
+                candidates.add(pkg)
+
+    # Last-resort broader token capture (more permissive) -- filtered by _is_valid_pkg
+    # This helps catch packages embedded in JSON or attributes not matching the strict patterns
+    if not candidates:
+        for m in re.finditer(r"""['"]([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})['"]""", text):
             pkg = m.group(1).rstrip('.,;\'"\\ ')
             if _is_valid_pkg(pkg):
                 candidates.add(pkg)
@@ -914,7 +930,7 @@ def extract_package_from_page(page):
     for frame in page.frames:
         try:
             frame_html = frame.evaluate("() => document.documentElement.outerHTML")
-            if frame_html and len(frame_html) > 200:
+            if frame_html and len(frame_html) > 120:  # lowered threshold to catch smaller iframes
                 collected_texts.append(frame_html)
 
             hrefs = frame.evaluate("""
@@ -1268,14 +1284,14 @@ def has_visible_image_creative(page):
         const imageLike = Array.from(document.querySelectorAll('img, picture, canvas, svg')).some(el => {
             const src = String(el.getAttribute('src') || '').toLowerCase();
             const alt = String(el.getAttribute('alt') || '').toLowerCase();
-            if (src.includes('googlelogo') || alt.includes('google')) return false;
+            if (src.includes('googlelogo') || alt.includes('google')) return False;
             return isVisible(el);
         });
 
         if (imageLike) return True;
 
         return Array.from(document.querySelectorAll('*')).some(el => {
-            if (!isVisible(el)) return false;
+            if (!isVisible(el)) return False;
             const bg = window.getComputedStyle(el).backgroundImage || '';
             return bg && bg !== 'none' && bg.includes('url(');
         });
@@ -1550,7 +1566,7 @@ def scrape_single_url(url_row):
                     message = "Used package from network resources (fallback)"
                     print(f"⚠️ Row {row_num}: no strict match but using network package -> {package_name}")
                 else:
-                    # Optional softer fallback: accept a weaker score if clearly better than nothing
+                    # Softer fallback: accept a weaker score if clearly better than nothing
                     if raw_best_pkg and raw_best_score >= 0.68:
                         package_name = raw_best_pkg
                         match_score = raw_best_score
