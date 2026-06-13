@@ -633,192 +633,88 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
-# HEADLINE AND DESCRIPTION LOGIC (IMPROVED)
+# HEADLINE AND DESCRIPTION LOGIC
 # =========================
 
 def wait_and_extract_headline_description(page, max_wait_seconds=15):
     """
-    Extract headline + description preferring title-like selectors first.
-    - Checks ranked iframe targets first (iframe-first behavior).
-    - Uses strong selectors for titles (#ad-title, *app-title*, h1/h2).
-    - Uses description selectors (#ad-description, *description*, p, known classes).
-    - If headline ends up being install-text, swaps headline/description when sensible.
+    Polls for Headline and Description inside iframes ONLY.
+    Uses structural class patterns (-e-15, -e-67) and visibility checks 
+    to avoid grabbing hidden template text.
     """
     js = r"""
     () => {
-        const clean = s => (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim();
-        const isVisible = el => {
-            if(!el) return false;
-            try{
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
-            }catch(e){ return false; }
+        let headText = "N/A";
+        let descText = "N/A";
+
+        // Helper to ensure we don't grab hidden/template elements
+        const isVisible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
 
-        const trySelectors = (selectors) => {
-            for(const sel of selectors){
-                try{
-                    const nodes = Array.from(document.querySelectorAll(sel));
-                    for(const n of nodes){
-                        if(!isVisible(n)) continue;
-                        const txt = clean(n.innerText || n.textContent || '');
-                        if(txt && txt.length >= 2 && !txt.includes('{{')) return txt;
-                    }
-                }catch(e){}
-            }
-            return null;
-        };
-
-        const headline_selectors = [
-            '#ad-title',
-            '[id*="app-title"]',
-            '[class*="app-title"]',
-            '[class*="ad-title"]',
-            '[class*="title"]',
-            '[class*="headline"]',
-            'h1',
-            'h2',
-            'div[role="heading"]',
-            'div[role="link"] span'
-        ];
-
-        const desc_selectors = [
-            '#ad-description',
-            '[class*="description"]',
-            '[class*="desc"]',
-            'div.cS4Vcb-vnv8ic',
-            'div.HFTpmd-WsjYwc-hgDUwe',
-            'p',
-            'span'
-        ];
-
-        let headline = trySelectors(headline_selectors) || "N/A";
-        let description = trySelectors(desc_selectors) || "N/A";
-
-        // If headline missing but description exists, try to find a nearby title node around description nodes
-        if((!headline || headline === 'N/A') && description && description !== 'N/A'){
-            try{
-                for(const sel of desc_selectors){
-                    const descNodes = Array.from(document.querySelectorAll(sel)).filter(isVisible);
-                    for(const dn of descNodes){
-                        // check previous siblings
-                        let prev = dn.previousElementSibling;
-                        for(let i=0;i<6 && prev;i++, prev = prev.previousElementSibling){
-                            try{
-                                for(const hsel of headline_selectors){
-                                    if(prev.matches && prev.matches(hsel) && isVisible(prev)){
-                                        const t = clean(prev.innerText || prev.textContent || '');
-                                        if(t && !t.includes('{{')) { headline = t; break; }
-                                    }
-                                }
-                            }catch(e){}
-                        }
-                        if(headline && headline !== 'N/A') break;
-                        // check parents for title-like nodes
-                        let p = dn.parentElement;
-                        for(let depth=0; depth<6 && p; depth++, p = p.parentElement){
-                            try{
-                                for(const hsel of headline_selectors){
-                                    const found = p.querySelector && p.querySelector(hsel);
-                                    if(found && isVisible(found)){
-                                        const t = clean(found.innerText || found.textContent || '');
-                                        if(t && !t.includes('{{')) { headline = t; break; }
-                                    }
-                                }
-                            }catch(e){}
-                            if(headline && headline !== 'N/A') break;
-                        }
-                        if(headline && headline !== 'N/A') break;
-                    }
-                    if(headline && headline !== 'N/A') break;
+        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
+        const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
+        for (let el of headNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                // Ensure it's not a template placeholder like {{headline}}
+                if (text.length > 1 && !text.includes('{{')) { 
+                    headText = text; 
+                    break; 
                 }
-            }catch(e){}
+            }
         }
 
-        // Small safety swap heuristic when extractor picked an "Install..." line as headline:
-        try{
-            const lowerH = (headline || '').toLowerCase();
-            const lowerD = (description || '').toLowerCase();
-            const installWords = ['install','get','download'];
-            const hHasInstall = installWords.some(w => lowerH.includes(w));
-            const dHasInstall = installWords.some(w => lowerD.includes(w));
-            // If headline looks like install text but description does not, and description is short/looks like a title, swap
-            if(headline && description && hHasInstall && !dHasInstall){
-                const swapIfLooksLikeTitle = (str) => {
-                    const len = (str||'').trim().length;
-                    return len > 2 && len < 120;
-                };
-                if(swapIfLooksLikeTitle(description)){
-                    const tmp = headline; headline = description; description = tmp;
+        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
+        const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
+        for (let el of descNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                if (text.length > 1 && text !== headText && !text.includes('{{')) { 
+                    descText = text; 
+                    break; 
                 }
             }
-        }catch(e){}
+        }
 
-        if(headline === 'N/A' && description !== 'N/A') return { headline: 'N/A', description };
-        if(headline !== 'N/A' || description !== 'N/A') return { headline, description };
+        // If we found either one, return it
+        if (headText !== "N/A" || descText !== "N/A") {
+            return { headline: headText, description: descText };
+        }
+
         return null;
     }
     """
 
     start = time.time()
-    end = start + max_wait_seconds
-
-    # Try ranked frames first (iframe-first behavior)
-    try:
-        ranked = get_ranked_non_video_targets(page)
-    except Exception:
-        ranked = []
-
-    for score, target, kind, info in ranked:
-        if time.time() > end:
-            break
-        try:
-            if kind == "iframe":
-                res = target.evaluate(js)
-            else:
-                res = page.evaluate(js)
-            if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
-                return res.get("headline", "N/A"), res.get("description", "N/A")
-        except Exception:
-            continue
-
-    # fallback to main page then frames with retries
-    while time.time() < end:
-        try:
-            res = page.evaluate(js)
-            if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
-                return res.get("headline", "N/A"), res.get("description", "N/A")
-        except Exception:
-            pass
-
+    
+    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
+    while time.time() - start < max_wait_seconds:
+        
+        # STRICTLY CHECK IFRAMES ONLY.
         for frame in page.frames:
-            if time.time() > end:
-                break
             try:
-                res = frame.evaluate(js)
-                if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
-                    return res.get("headline", "N/A"), res.get("description", "N/A")
+                result = frame.evaluate(js)
+                if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
+                    return result.get("headline", "N/A"), result.get("description", "N/A")
             except Exception:
                 continue
-
+        
+        # Wait 1 second and loop again to let the ad iframe fully load
         page.wait_for_timeout(1000)
 
+    # If the timer runs out, return N/A
     return "N/A", "N/A"
 
 
 # =========================
-# NEW: IMPROVED IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (fallback)
+# IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (fallback)
 # =========================
-
+# keep the image extractor as a lower-priority fallback (already present in your code)
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """
-    Improved image-ad extractor:
-    - For each visible image-like element, collects nearby text candidates with font-size
-    - Chooses the largest-font candidate as headline, next-best as description
-    - Runs in the main page and inside frames (prioritizes ranked frames first)
-    Returns (headline, description) or ("N/A", "N/A")
-    """
     js = r"""
     () => {
         function clean(s){ return (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim(); }
@@ -1032,7 +928,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                     return res.get("headline", "N/A"), res.get("description", "N/A")
             except Exception:
                 continue
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(300)
     return "N/A", "N/A"
 
 
@@ -1424,7 +1320,7 @@ def _score_non_video_target(target):
         });
 
         const descNodes = Array.from(document.querySelectorAll(
-            '[class*="-e-67"], [class*="long-description"], [class*="description"], [aria-label*="Description"], [aria-label*="description"]'
+            '[class*="-e-67"], [class*="long-description"], [class*="description'], [aria-label*="Description"], [aria-label*="description"]'
         )).filter(el => {
             const txt = cleanText(el.innerText || el.textContent || '');
             return txt.length >= 8 && txt.length <= 260 && isVisible(el) && !txt.includes('{{');
@@ -1880,7 +1776,7 @@ def scrape_single_url(url_row):
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = "Non-video ad found, but package not found or below threshold"
+                    message = f"Non-video {ad_type} ad found, but package score below {MIN_PACKAGE_MATCH_SCORE}. Best score={match_score}"
                     print(f"⚠️ Row {row_num}: package score below threshold or not found, writing N/A | best score={match_score}")
 
             data = [
