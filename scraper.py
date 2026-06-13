@@ -1551,17 +1551,25 @@ def scrape_single_url(url_row):
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
             text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-            headline = clean_text(text_data.get("headline"))
-            description = clean_text(text_data.get("description"))
 
-            # If no headline/description found in main/iframes, attempt image-based extraction
-            if headline == "N/A" and description == "N/A":
-                image_data = extract_image_ad_text(page)
-                headline = clean_text(image_data.get("headline"))
-                description = clean_text(image_data.get("description"))
+headline = clean_text(text_data.get("headline"))
+description = clean_text(text_data.get("description"))
 
-            process_time = get_exact_time()
-            has_text = is_valid_text_ad(headline, description)
+is_image_extracted = False
+
+# text ad extractor failed
+if headline == "N/A" and description == "N/A":
+
+    image_data = extract_image_ad_text(page)
+
+    headline = clean_text(image_data.get("headline"))
+    description = clean_text(image_data.get("description"))
+
+    if headline != "N/A" or description != "N/A":
+        is_image_extracted = True
+
+process_time = get_exact_time()
+has_text = is_valid_text_ad(headline, description)
 
             # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
@@ -1597,10 +1605,10 @@ def scrape_single_url(url_row):
                 print(f"⏭ Row {row_num}: no video and no valid text/image ad found")
                 return
 
-            if has_text:
-                print(f"🔎 Row {row_num}: text/image headline -> {headline}")
-            else:
-                print(f"🖼 Row {row_num}: likely image ad, headline/description not found")
+           if ad_type == "image":
+    print(f"🖼 Row {row_num}: IMAGE headline -> {headline}")
+else:
+    print(f"🔎 Row {row_num}: TEXT headline -> {headline}")
 
             print(f"📦 Row {row_num}: resolving package from visible install link first")
 
