@@ -1542,9 +1542,8 @@ def scrape_single_url(url_row):
             visible_package = extract_package_name(visible_app_link)
 
             is_image_like = has_visible_image_creative(page)
-            
-            # --- NEW: if it's image-like but we didn't get headline/description from text path,
-            # try a specialized image-text extraction routine and treat it like text if valid.
+
+            # NEW: Only when image-like and text not found, try image extraction and then reuse existing package matching.
             if not has_text and is_image_like:
                 img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
                 img_head = clean_text(img_head)
@@ -1619,16 +1618,13 @@ def scrape_single_url(url_row):
                     message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
                     print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
 
-            # --- Minimal change only: ensure Column F contains "IMAGE" for image ads (uppercase).
-            ad_type_for_sheet = "IMAGE" if ad_type == "image" else ad_type
-
             data = [
                 advertiser,
                 package_name,
                 url,
                 app_link,
                 process_time,
-                ad_type_for_sheet,      # Column F: text/image for non-video ads (image -> "IMAGE")
+                ad_type,      # Column F: text/image for non-video ads (unchanged behavior; 'image' lowercase)
                 process_time
             ]
 
