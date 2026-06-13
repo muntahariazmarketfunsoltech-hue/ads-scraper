@@ -781,113 +781,56 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-
-
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Headline = LARGER text element
-    Description = SMALLER text element below it
+    Uses the SAME METHOD as text ads:
+    - Specific class name selectors
+    - Main page DOM first (active visible creative)
+    - Falls back to iframe if necessary
+    - Relaxed visibility check
     """
     js = r"""
     () => {
         const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
+        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
         const isVisible = (el) => {
             if (!el) return false;
             const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return false;
             const style = window.getComputedStyle(el);
-            if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-            return true;
+            return rect.width > 0 && rect.height > 0 &&
+                   style.visibility !== 'hidden' &&
+                   style.display !== 'none' &&
+                   style.opacity !== '0';
         };
-
-        // Get ALL visible text content with font size info
-        let textElements = [];
-        
-        document.querySelectorAll('*').forEach(el => {
-            // Skip if has children elements (only leaf nodes)
-            if (el.children.length > 0) return;
-            
-            const txt = cleanText(el.textContent || '');
-            if (txt.length < 2 || txt.length > 300) return;
-            
-            // Skip hidden content
-            if (!isVisible(el)) return;
-            
-            // Skip special markers
-            if (txt.includes('{{') || txt.includes('}}')) return;
-            
-            const style = window.getComputedStyle(el);
-            const fontSize = parseFloat(style.fontSize) || 0;
-            const rect = el.getBoundingClientRect();
-            
-            textElements.push({
-                text: txt,
-                fontSize: fontSize,
-                y: rect.top,
-                x: rect.left,
-                el: el
-            });
-        });
-
-        // Sort by Y position first (top to bottom)
-        textElements.sort((a, b) => {
-            if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
-            return a.x - b.x;
-        });
 
         let headline = "N/A";
         let description = "N/A";
 
-        // Find BIGGER text as headline
-        let maxFontSize = 0;
-        let headlineObj = null;
-
-        for (let elem of textElements) {
-            const txt = elem.text;
-            
-            // Skip obvious non-ad text
-            if (txt.toLowerCase().includes('sign in')) continue;
-            if (txt.toLowerCase().includes('log in')) continue;
-            if (txt.toLowerCase().includes('home')) continue;
-            if (txt.toLowerCase().includes('help')) continue;
-            if (txt.toLowerCase().includes('agent_')) continue;
-            if (txt.toLowerCase().includes('install')) continue;
-            if (txt.toLowerCase().includes('download')) continue;
-            if (txt.toLowerCase().includes('get')) continue;
-            
-            // Look for the largest font size text (headline)
-            if (elem.fontSize > maxFontSize && txt.length <= 120) {
-                maxFontSize = elem.fontSize;
-                headlineObj = elem;
-                headline = txt;
-            }
+        // 1️⃣ IMAGE AD SPECIFIC CLASS SELECTORS (same method as text ads)
+        // Try multiple class patterns used by Google Ads for image creatives
+        const headlineEl = document.querySelector(
+            'div.landscape-app-title, ' +
+            '[class*="app-title"], ' +
+            '[class*="headline"], ' +
+            'div[role="link"] span, ' +
+            'div.HFTpmd-WsjYwc-hgDUwe, ' +
+            'div.cS4Vcb-vnv8ic'
+        );
+        if (headlineEl && isVisible(headlineEl)) {
+            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
         }
 
-        // Find SMALLER text below headline as description
-        if (headlineObj !== null) {
-            for (let elem of textElements) {
-                const txt = elem.text;
-                
-                // Must be below headline and smaller font
-                if (elem.y <= headlineObj.y) continue;
-                if (elem.fontSize >= headlineObj.fontSize) continue;
-                if (txt === headline) continue;
-                
-                // Skip non-ad text
-                if (txt.toLowerCase().includes('sign in')) continue;
-                if (txt.toLowerCase().includes('log in')) continue;
-                if (txt.toLowerCase().includes('install')) continue;
-                if (txt.toLowerCase().includes('download')) continue;
-                if (txt.toLowerCase().includes('agent_')) continue;
-                
-                // Valid description (smaller font, below headline)
-                if (txt.length >= 8 && txt.length <= 200) {
-                    description = txt;
-                    break;
-                }
-            }
+        const descriptionEl = document.querySelector(
+            'div.landscape-app-text, ' +
+            '[class*="app-text"], ' +
+            '[class*="long-description"], ' +
+            'div.HFTpmd-WsjYwc-hgDUwe, ' +
+            'div.cS4Vcb-vnv8ic'
+        );
+        if (descriptionEl && isVisible(descriptionEl)) {
+            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
         }
 
         return { headline, description };
@@ -900,27 +843,30 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
                 return data
         except Exception:
-            pass
+            return None
         return None
 
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # Check iframes first
-        for frame in page.frames:
-            data = read_target(frame)
-            if data:
-                return data
-
-        # Then main page
+        # 1) Check main page DOM first (active visible creative) - SAME AS TEXT ADS
         data = read_target(page)
         if data:
             return data
+
+        # 2) Fallback: check iframes only if main DOM didn't yield headline/description - SAME AS TEXT ADS
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            data = read_target(frame)
+            if data:
+                return data
 
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
 # =========================
+
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
 
