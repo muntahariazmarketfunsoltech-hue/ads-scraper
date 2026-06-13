@@ -716,11 +716,8 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
-    Improved image-ad extractor:
-    - For each visible image-like element, collects nearby text candidates with font-size
-    - Chooses the largest-font candidate as headline, next-best as description
-    - Runs in the main page and inside frames (prioritizes ranked frames first)
-    Returns (headline, description) or ("N/A", "N/A")
+    Improved image-ad extractor that prefers text near the creative or near an install link.
+    Returns (headline, description) or ("N/A","N/A")
     """
     js = r"""
     () => {
@@ -737,56 +734,137 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             } catch(e) { return false; }
         };
 
-        const collectTextCandidates = (root, imgEl) => {
+        const hasInstallNearby = (root, el) => {
+            try {
+                // search up to 5 ancestors for anchors/buttons with install-like href/text
+                let anc = el;
+                for (let depth = 0; depth < 6 && anc; depth++, anc = anc.parentElement) {
+                    if (!anc) break;
+                    // check anchors in anc
+                    const anchors = Array.from(anc.querySelectorAll('a[href], button, [role="link"]'));
+                    for (let a of anchors) {
+                        try {
+                            const href = (a.getAttribute && (a.getAttribute('href') || a.getAttribute('data-href'))) || a.href || '';
+                            const txt = (a.innerText || a.textContent || '').toLowerCase();
+                            if (!href && !txt) continue;
+                            const hrefLower = (href || '').toLowerCase();
+                            if (hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')) {
+                                return true;
+                            }
+                        } catch(e) { continue; }
+                    }
+                }
+
+                // also check siblings (nearby)
+                let prev = el.previousElementSibling;
+                for (let i=0;i<5 && prev;i++, prev = prev.previousElementSibling) {
+                    const anchors = Array.from(prev.querySelectorAll('a[href], button, [role="link"]'));
+                    for (let a of anchors) {
+                        try {
+                            const href = (a.getAttribute && (a.getAttribute('href') || a.getAttribute('data-href'))) || a.href || '';
+                            const txt = (a.innerText || a.textContent || '').toLowerCase();
+                            const hrefLower = (href || '').toLowerCase();
+                            if (hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')) {
+                                return true;
+                            }
+                        } catch(e) { continue; }
+                    }
+                }
+                let next = el.nextElementSibling;
+                for (let i=0;i<5 && next;i++, next = next.nextElementSibling) {
+                    const anchors = Array.from(next.querySelectorAll('a[href], button, [role="link"]'));
+                    for (let a of anchors) {
+                        try {
+                            const href = (a.getAttribute && (a.getAttribute('href') || a.getAttribute('data-href'))) || a.href || '';
+                            const txt = (a.innerText || a.textContent || '').toLowerCase();
+                            const hrefLower = (href || '').toLowerCase();
+                            if (hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')) {
+                                return true;
+                            }
+                        } catch(e) { continue; }
+                    }
+                }
+            } catch(e) {}
+            return false;
+        };
+
+        const looksLikeCreativeContainer = (el) => {
+            try {
+                let anc = el;
+                for (let i=0;i<6 && anc; i++, anc = anc.parentElement) {
+                    if (!anc) break;
+                    const cn = (anc.className || '').toLowerCase();
+                    const idn = (anc.id || '').toLowerCase();
+                    if (cn.includes('creative') || cn.includes('ad-') || cn.includes('advert') || cn.includes('ad_') || cn.includes('ad ')) return true;
+                    if (idn.includes('creative') || idn.includes('ad-') || idn.includes('advert')) return true;
+                }
+            } catch(e){}
+            return false;
+        };
+
+        const collectTextCandidatesForImage = (imgEl) => {
             const candidates = [];
 
-            // helper to push candidate with font size
-            const pushIfGood = (el) => {
-                if (!el) return;
+            const pushCandidate = (el, extra={}) => {
                 try {
+                    if (!el) return;
                     if (!isVisible(el)) return;
                     const txt = clean(el.innerText || el.textContent || '');
                     if (!txt || txt.length < 2 || txt.length > 500 || txt.includes('{{')) return;
                     const style = window.getComputedStyle(el);
                     const font = parseFloat(style.fontSize || '0') || 0;
-                    // prefer shorter headline-like strings too
-                    candidates.push({ text: txt, font: font, length: txt.length });
-                } catch(e) { }
+                    candidates.push({
+                        text: txt,
+                        font,
+                        len: txt.length,
+                        installNearby: extra.installNearby || false,
+                        creativeContainer: extra.creativeContainer || false
+                    });
+                } catch(e) {}
             };
 
-            // alt/title first
-            try {
+            # alt/title = low-font but keep if installNearby/creativeContainer
+            try:
                 const alt = clean(imgEl.getAttribute('alt') || imgEl.getAttribute('title') || '');
-                if (alt) candidates.push({ text: alt, font: 12, length: alt.length });
-            } catch(e){}
+                if (alt) {
+                    const flag = hasInstallNearby(document, imgEl) || looksLikeCreativeContainer(imgEl);
+                    candidates.push({text: alt, font: 12, len: alt.length, installNearby: flag, creativeContainer: flag});
+                }
+            except(e){}
 
-            // immediate siblings
+            # siblings
             let s = imgEl.previousElementSibling;
-            for (let i=0;i<6 && s; i++, s = s.previousElementSibling) { pushIfGood(s); }
+            for (let i=0;i<6 && s; i++, s=s.previousElementSibling) pushCandidate(s, { installNearby: hasInstallNearby(document, imgEl), creativeContainer: looksLikeCreativeContainer(imgEl) });
             s = imgEl.nextElementSibling;
-            for (let i=0;i<6 && s; i++, s = s.nextElementSibling) { pushIfGood(s); }
+            for (let i=0;i<6 && s; i++, s = s.nextElementSibling) pushCandidate(s, { installNearby: hasInstallNearby(document, imgEl), creativeContainer: looksLikeCreativeContainer(imgEl) });
 
-            // small search in parent, then ancestor up to depth 5
-            let ancestor = imgEl.parentElement;
-            for (let depth=0; depth<5 && ancestor; depth++, ancestor = ancestor.parentElement) {
+            # ancestor search for headings/captions and visible leafs
+            let anc = imgEl.parentElement;
+            for (let depth=0; depth<5 && anc; depth++, anc = anc.parentElement) {
                 try {
-                    // prefer headings and figcaptions
-                    const h = ancestor.querySelector('figcaption, h1,h2,h3,h4, .headline, .title, .caption, .ad-caption, .creative-caption, .ad-title');
-                    if (h) pushIfGood(h);
-                    // also gather other visible leaf texts inside the ancestor
-                    const leafs = Array.from(ancestor.querySelectorAll('*')).filter(e => e.childElementCount === 0);
-                    for (let lf of leafs.slice(0,20)) pushIfGood(lf);
-                } catch(e) { continue; }
+                    const h = anc.querySelector('figcaption, h1,h2,h3,h4, .headline, .title, .caption, .ad-caption, .creative-caption, .ad-title, .ad-headline');
+                    if (h) pushCandidate(h, { installNearby: hasInstallNearby(document, imgEl), creativeContainer: looksLikeCreativeContainer(imgEl) });
+                    const leafs = Array.from(anc.querySelectorAll('*')).filter(e => e.childElementCount === 0).slice(0,20);
+                    for (let lf of leafs) pushCandidate(lf, { installNearby: hasInstallNearby(document, imgEl), creativeContainer: looksLikeCreativeContainer(imgEl) });
+                } catch(e) {}
             }
 
-            // unique and reasonable sorting
+            # unique + sort
             const uniq = {};
             const out = [];
             for (let c of candidates) {
-                const key = c.text.slice(0,120);
-                if (!uniq[key]) { uniq[key] = true; out.push(c); }
+                const k = c.text.slice(0,120);
+                if (!uniq[k]) { uniq[k] = true; out.push(c); }
             }
-            out.sort((a,b) => (b.font || 0) - (a.font || 0) || a.length - b.length);
+
+            out.sort((a,b) => {
+                // prefer installNearby, creativeContainer, higher font, shorter length
+                if ((b.installNearby?1:0) - (a.installNearby?1:0)) return (b.installNearby?1:0) - (a.installNearby?1:0);
+                if ((b.creativeContainer?1:0) - (a.creativeContainer?1:0)) return (b.creativeContainer?1:0) - (a.creativeContainer?1:0);
+                if ((b.font || 0) - (a.font || 0)) return (b.font || 0) - (a.font || 0);
+                return a.len - b.len;
+            });
+
             return out;
         };
 
@@ -800,7 +878,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             } catch(e) { return false; }
         });
 
-        // prefer larger images
         imgs.sort((a,b) => {
             try {
                 const ra = a.getBoundingClientRect();
@@ -811,13 +888,15 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
 
         for (let img of imgs) {
             try {
-                const cands = collectTextCandidates(document, img);
+                const cands = collectTextCandidatesForImage(img);
                 if (cands && cands.length) {
-                    const headline = clean(cands[0].text || '') || "N/A";
-                    const description = (cands.length > 1 ? clean(cands[1].text) : "N/A") || "N/A";
-                    // ensure headline isn't just "Ad" or "Sponsored"
+                    // prefer candidates with installNearby or creativeContainer
+                    const installCands = cands.filter(c => c.installNearby || c.creativeContainer);
+                    const pool = installCands.length ? installCands : cands;
+                    const headline = clean(pool[0].text || '') || "N/A";
+                    const description = (pool.length > 1 ? clean(pool[1].text) : "N/A") || "N/A";
                     const lower = headline.toLowerCase();
-                    if (headline && headline.length > 1 && !lower.includes('ad') && !lower.includes('sponsored')) {
+                    if (headline && headline.length > 1 && !lower.includes('ads transparency') && !lower.includes('see more ads') && !lower.includes('report this ad') && !lower.includes('ad details')) {
                         return { headline, description };
                     }
                 }
@@ -831,13 +910,12 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     start = time.time()
     end = start + max_wait_seconds
 
-    # Try top-ranked frames first (if available)
+    # Try top-ranked frames first
     try:
         ranked = get_ranked_non_video_targets(page)
     except Exception:
         ranked = []
 
-    # Evaluate in the most likely frames first
     for score, target, kind, info in ranked:
         if time.time() > end:
             break
@@ -852,7 +930,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         except Exception:
             continue
 
-    # fallback to whole-page run and frames full scan
+    # fallback: page + frames scan
     while time.time() < end:
         try:
             res = page.evaluate(js)
@@ -860,7 +938,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                 return res.get("headline", "N/A"), res.get("description", "N/A")
         except Exception:
             pass
-
         for frame in page.frames:
             if time.time() > end:
                 break
@@ -870,8 +947,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                     return res.get("headline", "N/A"), res.get("description", "N/A")
             except Exception:
                 continue
-
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(300)
     return "N/A", "N/A"
 
 
@@ -1056,7 +1132,7 @@ def extract_packages_from_text(raw_text):
     patterns = [
         r"""['"]appId['"]\s*:\s*['"]([A-Za-z][\w.]+)['"]""",
         r"""play\.google\.com/store/apps/details[^\s'"<>]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
-        r"""market://[^\s'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
+        r"""market://[^\s'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0_]*){2,})""",
         r"""(?:destination_url|final_url|click_url|destUrl|clickUrl|landingUrl)['"\s]*:['"\s]*['"][^'"]*[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
         r"""[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})""",
         r"""[?&]package=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){2,})"""
