@@ -1230,7 +1230,6 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-
 # ---------------------------
 # NEW: IMAGE AD headline/description extraction (non-invasive)
 # ---------------------------
@@ -1543,8 +1542,8 @@ def scrape_single_url(url_row):
 
             is_image_like = has_visible_image_creative(page)
             
-            # --- NEW: if it's image-like but we didn't get headline/description from text path,
-            # try a specialized image-text extraction routine and treat it like text if valid.
+            # If it's image-like but no headline/description found from text path,
+            # try image-specific extraction (non-invasive) and reuse text matching logic.
             if not has_text and is_image_like:
                 img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
                 img_head = clean_text(img_head)
