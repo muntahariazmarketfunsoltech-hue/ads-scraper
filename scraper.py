@@ -782,7 +782,7 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
     return {"headline": "N/A", "description": "N/A"}
 
 # =========================
-# STRICT TEXT-AD PACKAGE MATCHER
+# STRICT TEXT-AD PACKAGE MATCHER (0.76 THRESHOLD FOR TEXT ADS ONLY)
 # =========================
 
 MIN_PACKAGE_MATCH_SCORE = 0.76
@@ -829,8 +829,9 @@ def package_tokens_for_matching(pkg):
 
 def score_package_against_text(pkg, headline, description):
     """
-    STRICT score for non-video ads: compare package ONLY with visible headline + description.
-    This prevents image ads from using random hidden package names from the page HTML.
+    STRICT score for TEXT ADS ONLY: compare package with visible headline + description.
+    Threshold: 0.76
+    This prevents text ads from using random hidden package names from the page HTML.
     """
     visible_raw = f"{headline or ''} {description or ''}"
     visible_clean = clean_text_for_comparison(visible_raw)
@@ -874,7 +875,7 @@ def score_package_against_text(pkg, headline, description):
     partial_hits = list(dict.fromkeys(partial_hits))
     total_hits = len(set(exact_hits + partial_hits))
 
-    # One weak/fuzzy word is NOT enough now. This is the main image-ad false-match fix.
+    # One weak/fuzzy word is NOT enough now. This is the main text-ad false-match fix.
     if len(exact_hits) >= 2:
         score = max(score, 0.92)
     elif len(exact_hits) == 1 and len(exact_hits[0]) >= 8:
@@ -896,6 +897,7 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
     """
     Compare headline + description with every found package.
     Returns (package, score). If no package score is at least 0.76, returns (None, best_score).
+    Only used for TEXT ADS.
     """
     if not package_list:
         return None, 0.0
@@ -1459,15 +1461,15 @@ def scrape_single_url(url_row):
                 return
 
             if has_text:
-                print(f"🔎 Row {row_num}: headline -> {headline}")
+                print(f"🔎 Row {row_num}: TEXT AD headline -> {headline}")
             else:
-                print(f"🖼 Row {row_num}: image ad detected")
+                print(f"🖼 Row {row_num}: IMAGE ad detected")
 
             # Try to extract package from page
             print(f"📦 Row {row_num}: extracting packages from page...")
             all_found_packages = extract_package_from_page(page)
 
-            # Package resolution logic (for both text and image ads)
+            # Package resolution logic (for TEXT ADS ONLY with 0.76 threshold)
             package_name = None
             match_score = 0.0
             status = "NON_VIDEO_PACKAGE_NOT_FOUND"
@@ -1483,31 +1485,32 @@ def scrape_single_url(url_row):
                 print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
 
             elif has_text and all_found_packages:
-                # Priority 2: Strict matching for text ads or image ads with extracted text
-                print(f"📦 Row {row_num}: strict matching headline + description against {len(all_found_packages)} packages (threshold 0.76)")
-                matched_pkg, score = get_best_matching_package(headline, description, all_found_packages)
+                # Priority 2: STRICT matching for TEXT ADS ONLY with 0.76 threshold
+                print(f"📦 Row {row_num}: [TEXT AD] strict matching headline + description against {len(all_found_packages)} packages (threshold 0.76)")
+                matched_pkg, score = get_best_matching_package(headline, description, all_found_packages, min_score=MIN_PACKAGE_MATCH_SCORE)
                 
                 if matched_pkg and score >= MIN_PACKAGE_MATCH_SCORE:
                     package_name = matched_pkg
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
                     match_score = score
                     status = "SUCCESS"
-                    message = f"Non-video {ad_type} ad package strictly matched with score {match_score}"
-                    print(f"✅ Row {row_num}: strict matched package -> {package_name} | score={match_score}")
+                    message = f"TEXT AD package strictly matched with score {match_score} (threshold 0.76)"
+                    print(f"✅ Row {row_num}: [TEXT AD] strict matched package -> {package_name} | score={match_score}")
                 else:
                     best_score = score
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={best_score}"
-                    print(f"⚠️ Row {row_num}: package score below threshold -> best score={best_score}")
+                    message = f"TEXT AD found, but package score {best_score} below 0.76 threshold"
+                    print(f"⚠️ Row {row_num}: [TEXT AD] package score below 0.76 threshold -> best score={best_score}")
 
             else:
+                # IMAGE ADS: no strict matching (if image ad, package stays N/A if not from visible install)
                 package_name = "N/A"
                 app_link = "N/A"
                 status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                message = f"Non-video {ad_type} ad found, but no matching package"
-                print(f"⚠️ Row {row_num}: no suitable package found")
+                message = f"Non-video {ad_type} ad found, but no suitable package"
+                print(f"⚠️ Row {row_num}: [{ad_type.upper()}] no suitable package found")
 
             data = [
                 advertiser,
@@ -1586,6 +1589,7 @@ def run_parallel_combined_scraper(max_workers=2):
 
     print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
+    print(f"📊 TEXT ADS use strict 0.76 threshold | IMAGE ADS use visible install link only")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
