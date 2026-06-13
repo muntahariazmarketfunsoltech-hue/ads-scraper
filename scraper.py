@@ -784,11 +784,9 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
-    Enhanced extraction for IMAGE ADS.
-    Targets specific landscape image ad class names:
-    - landscape-app-title for headline
-    - landscape-app-text for description
-    Works in iframes and main page.
+    Enhanced extraction for IMAGE ADS using the same logic as text ads.
+    Targets landscape-app-title and landscape-app-text classes.
+    Searches across main page and iframes with visibility checks.
     """
     js = r"""
     () => {
@@ -807,49 +805,68 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // PRIMARY: Target the exact class names from landscape image ads
-        const headlineEl = document.querySelector('.landscape-app-title');
-        if (headlineEl && isVisible(headlineEl)) {
-            let text = cleanText(headlineEl.innerText || headlineEl.textContent || '');
-            if (text.length > 1) {
-                headline = text;
+        // SEARCH HEADLINE: Target landscape-app-title class
+        const headlineNodes = document.querySelectorAll('.landscape-app-title');
+        for (let el of headlineNodes) {
+            if (isVisible(el)) {
+                let text = cleanText(el.innerText || el.textContent || "");
+                // Ensure it's not a template placeholder like {{headline}}
+                if (text.length > 1 && !text.includes('{{')) { 
+                    headline = text; 
+                    break; 
+                }
             }
         }
 
-        const descriptionEl = document.querySelector('.landscape-app-text');
-        if (descriptionEl && isVisible(descriptionEl)) {
-            let text = cleanText(descriptionEl.innerText || descriptionEl.textContent || '');
-            if (text.length > 1 && text !== headline) {
-                description = text;
+        // SEARCH DESCRIPTION: Target landscape-app-text class
+        const descNodes = document.querySelectorAll('.landscape-app-text');
+        for (let el of descNodes) {
+            if (isVisible(el)) {
+                let text = cleanText(el.innerText || el.textContent || "");
+                if (text.length > 1 && text !== headline && !text.includes('{{')) { 
+                    description = text; 
+                    break; 
+                }
             }
         }
 
-        return { headline, description };
+        // If we found either one, return it
+        if (headline !== "N/A" || description !== "N/A") {
+            return { headline, description };
+        }
+
+        return null;
     }
     """
 
     def read_target(target):
         try:
-            data = target.evaluate(js)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
+            result = target.evaluate(js)
+            if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
+                return result.get("headline", "N/A"), result.get("description", "N/A")
         except Exception:
-            return None
+            pass
         return None
 
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # 1) Check all iframes first for image ad details
+        # STRICTLY CHECK IFRAMES FIRST
         for frame in page.frames:
-            data = read_target(frame)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
-
-        # 2) Then check main page
-        data = read_target(page)
-        if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-            return data
+            try:
+                result = read_target(frame)
+                if result:
+                    return {"headline": result[0], "description": result[1]}
+            except Exception:
+                continue
+        
+        # Then check main page
+        try:
+            result = read_target(page)
+            if result:
+                return {"headline": result[0], "description": result[1]}
+        except Exception:
+            pass
 
         page.wait_for_timeout(1000)
 
