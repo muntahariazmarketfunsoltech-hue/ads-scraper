@@ -1636,36 +1636,36 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
-           # NEW: If image-like but no text found by text-ad extractor, try the image-ad extractor
-if not has_text and is_image_like:
-    # try targeted frames first (best hit-rate)
-    img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
-    img_head = clean_text(img_head)
-    img_desc = clean_text(img_desc)
+            # NEW: If image-like but no text found by text-ad extractor, try the image-ad extractor
+            if not has_text and is_image_like:
+                # try targeted frames first (best hit-rate)
+                img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
+                img_head = clean_text(img_head)
+                img_desc = clean_text(img_desc)
 
-    # DEBUG log the candidates so you can inspect Row-level output
-    try:
-        if img_head != "N/A" or img_desc != "N/A":
-            safe_add_log(
-                row_number=row_num,
-                status="IMAGE_TEXT_CANDIDATE",
-                log_type="IMAGE_AD",
-                url=url,
-                message=f"img_head='{img_head}' img_desc='{img_desc}'"
-            )
-    except Exception:
-        pass
+                # DEBUG log the candidates so you can inspect Row-level output
+                try:
+                    if img_head != "N/A" or img_desc != "N/A":
+                        safe_add_log(
+                            row_number=row_num,
+                            status="IMAGE_TEXT_CANDIDATE",
+                            log_type="IMAGE_AD",
+                            url=url,
+                            message=f"img_head='{img_head}' img_desc='{img_desc}'"
+                        )
+                except Exception:
+                    pass
 
-    if is_valid_text_ad(img_head, img_desc):
-        headline = img_head
-        description = img_desc
-        has_text = True
-        print(f"🖼 Row {row_num}: extracted text from image ad -> {headline} | {description}")
+                if is_valid_text_ad(img_head, img_desc):
+                    headline = img_head
+                    description = img_desc
+                    has_text = True
+                    print(f"🖼 Row {row_num}: extracted text from image ad -> {headline} | {description}")
 
-# Resolve package: first from visible install link (same as before)
-if visible_package != "N/A":
-    package_name = visible_package
-    app_link = visible_app_link
+            # Resolve package: first from visible install link (same as before)
+            if visible_package != "N/A":
+                package_name = visible_package
+                app_link = visible_app_link
     match_score = 1.0
     status = "SUCCESS"
     message = f"Non-video {ad_type} ad package extracted from visible install link"
