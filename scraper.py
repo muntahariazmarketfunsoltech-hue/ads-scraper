@@ -1,6 +1,7 @@
 # Combined Google Ads Transparency scraper
 # Video-ad detection logic is kept from the original scrapper.txt.
 # Non-video ads use text/image extraction + package matching from the uploaded non-video files.
+# NO CACHING - Fresh extraction on every run
 
 from playwright.sync_api import sync_playwright
 from urllib.parse import urlparse, parse_qs, unquote
@@ -956,7 +957,7 @@ def _is_valid_pkg(pkg):
     return True
 
 def extract_packages_from_text(raw_text):
-    """Returns a SET of all unique, valid package names found in the text."""
+    """Returns a SET of all unique, valid package names found in the text. NO CACHING."""
     text = decode_all(raw_text)
     candidates = set()   
 
@@ -980,6 +981,7 @@ def extract_packages_from_text(raw_text):
 def extract_package_from_page(page):
     """
     Scans strictly the rendered DOM and visible links. 
+    NO CACHING - Fresh extraction on every run.
     Removes the background network fetching that caused cross-contamination.
     """
     collected_texts = []
@@ -1312,6 +1314,7 @@ def scrape_single_url(url_row):
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-web-security",
+                "--disable-http-cache",  # Disable browser cache
             ]
         )
 
@@ -1322,7 +1325,8 @@ def scrape_single_url(url_row):
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            ignore_https_errors=True,
         )
 
         page = context.new_page()
@@ -1349,14 +1353,14 @@ def scrape_single_url(url_row):
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
-            print(f"🔍 Row {row_num}: opening transparency URL")
+            print(f"🔍 Row {row_num}: opening transparency URL (NO CACHE)")
 
             safe_add_log(
                 row_number=row_num,
                 status="STARTED",
                 log_type="COMBINED",
                 url=url,
-                message="Started combined video/text/image ad extraction"
+                message="Started combined video/text/image ad extraction (fresh, no cache)"
             )
 
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -1417,7 +1421,7 @@ def scrape_single_url(url_row):
             # =========================
             # NON-VIDEO PATH: TEXT + IMAGE ADS
             # =========================
-            print(f"📄 Row {row_num}: no video found, checking text/image ad")
+            print(f"📄 Row {row_num}: no video found, checking text/image ad (fresh extraction)")
 
             # Try to extract headline/description using the relaxed extractor for both text and image ads
             text_data = wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15)
@@ -1465,8 +1469,8 @@ def scrape_single_url(url_row):
             else:
                 print(f"🖼 Row {row_num}: IMAGE ad detected")
 
-            # Try to extract package from page
-            print(f"📦 Row {row_num}: extracting packages from page...")
+            # Try to extract package from page (fresh, no cache)
+            print(f"📦 Row {row_num}: extracting packages from page (fresh extraction)...")
             all_found_packages = extract_package_from_page(page)
 
             # Package resolution logic (for TEXT ADS ONLY with 0.76 threshold)
@@ -1590,6 +1594,7 @@ def run_parallel_combined_scraper(max_workers=2):
     print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
     print(f"📊 TEXT ADS use strict 0.76 threshold | IMAGE ADS use visible install link only")
+    print(f"🚫 CACHING DISABLED - Fresh extraction on every run")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -1615,7 +1620,7 @@ def run_parallel_combined_scraper(max_workers=2):
                 except Exception:
                     pass
 
-    print("✅ Finished combined video + text + image scraping")
+    print("✅ Finished combined video + text + image scraping (no cache)")
 
 
 if __name__ == "__main__":
