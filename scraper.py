@@ -1570,10 +1570,10 @@ def scrape_single_url(url_row):
     all_found_packages = extract_package_from_page(page)
 
     package_name, match_score = get_best_matching_package(
-        headline,
-        description,
-        all_found_packages
-    )
+                                  headline,
+                                  description,
+                                  all_found_packages
+                                 )
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1598,11 +1598,11 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
-           safe_update_headline_desc(
-    row_num,
-    headline,
-    description
-)
+            safe_update_headline_desc(
+                row_num,
+                headline,
+                description
+              )
 
             safe_add_log(
                 row_number=row_num,
