@@ -637,167 +637,78 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 # HEADLINE AND DESCRIPTION LOGIC
 # =========================
 
-def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
+def wait_and_extract_headline_description(page, max_wait_seconds=15):
     """
-    Extract headline/description for BOTH text ads and image ads.
-    Existing text-ad logic preserved.
+    Polls for Headline and Description inside iframes ONLY.
+    Uses structural class patterns (-e-15, -e-67) and visibility checks 
+    to avoid grabbing hidden template text.
     """
-
     js = r"""
     () => {
+        let headText = "N/A";
+        let descText = "N/A";
 
-        const cleanText = (txt) =>
-            (txt || "")
-            .replace(/\n/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
-
+        // Helper to ensure we don't grab hidden/template elements
         const isVisible = (el) => {
             if (!el) return false;
-
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-
-            return (
-                rect.width > 0 &&
-                rect.height > 0 &&
-                style.visibility !== 'hidden' &&
-                style.display !== 'none' &&
-                style.opacity !== '0'
-            );
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
         };
 
-        let headline = "N/A";
-        let description = "N/A";
-
-        // =========================
-        // EXISTING TEXT AD LOGIC
-        // =========================
-
-        const headlineEl =
-            document.querySelector(
-                'div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic'
-            );
-
-        if (headlineEl && isVisible(headlineEl)) {
-            headline = cleanText(
-                headlineEl.innerText || headlineEl.textContent
-            );
-        }
-
-        const descriptionEl =
-            document.querySelector(
-                'div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic'
-            );
-
-        if (descriptionEl && isVisible(descriptionEl)) {
-            description = cleanText(
-                descriptionEl.innerText || descriptionEl.textContent
-            );
-        }
-
-        // =========================
-        // IMAGE AD FALLBACK
-        // =========================
-
-        if (headline === "N/A" || description === "N/A") {
-
-            const textBlocks = [];
-
-            document.querySelectorAll("*").forEach(el => {
-
-                if (!isVisible(el))
-                    return;
-
-                if (el.children.length > 0)
-                    return;
-
-                const txt = cleanText(
-                    el.innerText || el.textContent
-                );
-
-                if (!txt)
-                    return;
-
-                if (txt.length < 4)
-                    return;
-
-                if (txt.includes("Ads Transparency"))
-                    return;
-
-                if (txt.includes("See more ads"))
-                    return;
-
-                if (txt.length > 250)
-                    return;
-
-                textBlocks.push(txt);
-            });
-
-            if (headline === "N/A") {
-
-                const h = textBlocks.find(
-                    t => t.length >= 8 && t.length <= 80
-                );
-
-                if (h)
-                    headline = h;
-            }
-
-            if (description === "N/A") {
-
-                const d = textBlocks.find(
-                    t =>
-                        t !== headline &&
-                        t.length >= 20 &&
-                        t.length <= 200
-                );
-
-                if (d)
-                    description = d;
+        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
+        const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
+        for (let el of headNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                // Ensure it's not a template placeholder like {{headline}}
+                if (text.length > 1 && !text.includes('{{')) { 
+                    headText = text; 
+                    break; 
+                }
             }
         }
 
-        return {
-            headline,
-            description
-        };
+        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
+        const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
+        for (let el of descNodes) {
+            if (isVisible(el)) {
+                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
+                if (text.length > 1 && text !== headText && !text.includes('{{')) { 
+                    descText = text; 
+                    break; 
+                }
+            }
+        }
+
+        // If we found either one, return it
+        if (headText !== "N/A" || descText !== "N/A") {
+            return { headline: headText, description: descText };
+        }
+
+        return null;
     }
     """
 
-    def read_target(target):
-        try:
-            data = target.evaluate(js)
-            if data:
-                return data
-        except Exception:
-            pass
-        return None
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-
-        data = read_target(page)
-
-        if data:
-            return data
-
+    start = time.time()
+    
+    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
+    while time.time() - start < max_wait_seconds:
+        
+        # STRICTLY CHECK IFRAMES ONLY.
         for frame in page.frames:
-            if frame == page.main_frame:
+            try:
+                result = frame.evaluate(js)
+                if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
+                    return result.get("headline", "N/A"), result.get("description", "N/A")
+            except Exception:
                 continue
-
-            data = read_target(frame)
-
-            if data:
-                return data
-
+        
+        # Wait 1 second and loop again to let the ad iframe fully load
         page.wait_for_timeout(1000)
 
-    return {
-        "headline": "N/A",
-        "description": "N/A"
-    }
+    # If the timer runs out, return N/A
+    return "N/A", "N/A"
 
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
@@ -1563,16 +1474,10 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
-                if headline != "N/A" or description != "N/A":
+                if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
-
                     all_found_packages = extract_package_from_page(page)
-
-                    package_name, match_score = get_best_matching_package(
-                        headline,
-                        description,
-                        all_found_packages
-                    )
+                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1597,11 +1502,7 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(
-                row_num,
-                headline,
-                description
-              )
+            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
 
             safe_add_log(
                 row_number=row_num,
