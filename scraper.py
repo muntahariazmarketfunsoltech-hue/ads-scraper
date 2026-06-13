@@ -844,7 +844,7 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
     return None, best_score
 
 def decode_all(text):
-    """Decode every encoding variant so no package name is missed.""" 
+    """Decode every encoding variant so no package name is missed."""
     text = re.sub(r'\\x3[Dd]', '=', text)
     text = re.sub(r'\\x26',    '&', text)
     text = re.sub(r'\\x3[Ff]', '?', text)
