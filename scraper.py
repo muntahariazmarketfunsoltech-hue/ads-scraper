@@ -8,6 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import difflib
 import re
+import time
+import threading
+import sheets
 
 def get_best_matching_package_for_text_ad(headline, description, package_list, min_score=0.70):
     """Matches package names with headline + description using character-level comparison."""
@@ -34,10 +37,6 @@ def get_best_matching_package_for_text_ad(headline, description, package_list, m
     if best_score >= min_score:
         return best_pkg, best_score
     return None, best_score
-
-import time
-import threading
-import sheets
 
 
 MAX_WORKERS = 2
@@ -97,52 +96,7 @@ def clean_text(value):
         return "N/A"
     return re.sub(r"\s+", " ", str(value)).strip() or "N/A"
 
-def extract_packages_from_ranked_frames(page, max_frames=5):
-    """
-    Run package extraction on the most likely non-video targets (iframes + page).
-    Returns a set of candidate package names found (using existing extract_packages_from_text).
-    """
-    all_found = set()
 
-    try:
-        ranked = get_ranked_non_video_targets(page)
-    except Exception:
-        ranked = []
-
-    # include main page as last fallback
-    targets = [t for _, t, _, _ in ranked[:max_frames]]
-    if page not in targets:
-        targets.append(page)
-
-    for target in targets:
-        try:
-            # grab outerHTML, hrefs, and visible text from that target
-            html = ""
-            try:
-                html = target.evaluate("() => document.documentElement ? document.documentElement.outerHTML : ''")
-            except Exception:
-                pass
-            hrefs = ""
-            try:
-                hrefs_list = target.evaluate("""() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)""")
-                if hrefs_list:
-                    hrefs = "\n".join(hrefs_list)
-            except Exception:
-                pass
-            visible_text = ""
-            try:
-                visible_text = target.evaluate("() => document.body ? document.body.innerText : ''")
-            except Exception:
-                pass
-
-            combined = "\n".join([html or "", hrefs or "", visible_text or ""])
-            if combined and len(combined) > 10:
-                found = extract_packages_from_text(combined)
-                all_found.update(found)
-        except Exception:
-            continue
-
-    return all_found
 def extract_package_name(app_link):
     """
     Extracts package name from app store link.
@@ -755,8 +709,9 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
     # If the timer runs out, return N/A
     return "N/A", "N/A"
 
+
 # =========================
-# NEW: IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR
+# NEW: IMPROVED IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR
 # =========================
 
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
@@ -918,6 +873,8 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
 
         page.wait_for_timeout(400)
     return "N/A", "N/A"
+
+
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
@@ -1051,6 +1008,7 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
 
     return None, best_score
 
+
 def decode_all(text):
     """Decode every encoding variant so no package name is missed."""
     text = re.sub(r'\\x3[Dd]', '=', text)
@@ -1159,6 +1117,55 @@ def extract_package_from_page(page):
 
     combined = '\n'.join(collected_texts)
     return extract_packages_from_text(combined)
+
+
+def extract_packages_from_ranked_frames(page, max_frames=5):
+    """
+    Run package extraction on the most likely non-video targets (iframes + page).
+    Returns a set of candidate package names found (using existing extract_packages_from_text).
+    """
+    all_found = set()
+
+    try:
+        ranked = get_ranked_non_video_targets(page)
+    except Exception:
+        ranked = []
+
+    # include main page as last fallback
+    targets = [t for _, t, _, _ in ranked[:max_frames]]
+    if page not in targets:
+        targets.append(page)
+
+    for target in targets:
+        try:
+            # grab outerHTML, hrefs, and visible text from that target
+            html = ""
+            try:
+                html = target.evaluate("() => document.documentElement ? document.documentElement.outerHTML : ''")
+            except Exception:
+                pass
+            hrefs = ""
+            try:
+                hrefs_list = target.evaluate("""() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)""")
+                if hrefs_list:
+                    hrefs = "\n".join(hrefs_list)
+            except Exception:
+                pass
+            visible_text = ""
+            try:
+                visible_text = target.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                pass
+
+            combined = "\n".join([html or "", hrefs or "", visible_text or ""])
+            if combined and len(combined) > 10:
+                found = extract_packages_from_text(combined)
+                all_found.update(found)
+        except Exception:
+            continue
+
+    return all_found
+
 
 def extract_advertiser_from_page(page):
     try:
@@ -1438,6 +1445,8 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
+
+
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1448,6 +1457,7 @@ def is_valid_text_ad(headline, description):
     if description and description != "N/A" and len(clean_text(description)) >= 15:
         return True
     return False
+
 
 def has_visible_image_creative(page):
     """
@@ -1504,6 +1514,7 @@ def has_visible_image_creative(page):
             continue
 
     return False
+
 
 def scrape_single_url(url_row):
     row_num, url = url_row
@@ -1636,9 +1647,9 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
-            # NEW: If image-like but no text found by text-ad extractor, try the image-ad extractor
+            # If image-like but no text found by text-ad extractor, try the image-ad extractor
             if not has_text and is_image_like:
-                # try targeted frames first (best hit-rate)
+                # try targeted frames and page (improved extractor handles ranked frames)
                 img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
                 img_head = clean_text(img_head)
                 img_desc = clean_text(img_desc)
@@ -1666,20 +1677,23 @@ def scrape_single_url(url_row):
             if visible_package != "N/A":
                 package_name = visible_package
                 app_link = visible_app_link
-    match_score = 1.0
-    status = "SUCCESS"
-    message = f"Non-video {ad_type} ad package extracted from visible install link"
-else:
-    # If visible install not found, run package extraction targeted to ranked frames
-    package_name = None
-    match_score = 0.0
-    all_found_packages = extract_packages_from_ranked_frames(page)
-    if not all_found_packages:
-        # fallback to previous page-wide extraction
-        all_found_packages = extract_package_from_page(page)
+                match_score = 1.0
+                status = "SUCCESS"
+                message = f"Non-video {ad_type} ad package extracted from visible install link"
+                print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
+            else:
+                package_name = None
+                match_score = 0.0
 
-    if has_text and all_found_packages:
-        package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+                # Attempt frame-targeted package extraction first
+                all_found_packages = extract_packages_from_ranked_frames(page)
+                if not all_found_packages:
+                    # fallback to previous page-wide extraction
+                    all_found_packages = extract_package_from_page(page)
+
+                if has_text and all_found_packages:
+                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
+                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1690,8 +1704,8 @@ else:
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
-                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
+                    message = f"Non-video {ad_type} ad found, but package score below {MIN_PACKAGE_MATCH_SCORE}. Best score={match_score}"
+                    print(f"⚠️ Row {row_num}: package score below threshold or not found, writing N/A | best score={match_score}")
 
             data = [
                 advertiser,
@@ -1750,9 +1764,18 @@ else:
                 pass
 
         finally:
-            page.close()
-            context.close()
-            browser.close()
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 def run_parallel_combined_scraper(max_workers=2):
     urls = sheets.get_urls_with_retry()
