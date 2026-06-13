@@ -711,26 +711,78 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 
 
 # =========================
-# IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (fallback)
+# IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (explicit selectors + fallback)
 # =========================
-# keep the image extractor as a lower-priority fallback (already present in your code)
+
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
+    """
+    1) First tries explicit selectors/IDs commonly used by image creatives (from your samples):
+       - #ad-title, .discover__title, .discover__content span#ad-title
+       - #ad-description, .discover__description
+       - #landscape-app-title, .landscape-app-text, .landscape-title-bar .landscape-app-title
+    2) Runs those checks inside ranked frames first (most-likely creative frames).
+    3) If not found, falls back to the previous image heuristics that prefer install-nearby or large-font text.
+    Returns (headline, description) or ("N/A","N/A")
+    """
     js = r"""
     () => {
         function clean(s){ return (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim(); }
+        function pickIfValid(h, d){
+            if(!h) return null;
+            h = clean(h);
+            d = d ? clean(d) : "N/A";
+            if(!h || h.length < 2) return null;
+            return { headline: h, description: d || "N/A" };
+        }
+
+        // 1) Try explicit discover__ / ad-title selectors
+        try {
+            const selPairs = [
+                // selector for headline, selector for description
+                ['#ad-title', '#ad-description'],
+                ['.discover__title', '.discover__description'],
+                ['.discover__content #ad-title', '.discover__content #ad-description'],
+                ['.discover_title #ad-title', '.discover_description #ad-description'],
+                ['#landscape-app-title', '#landscape-app-text'],
+                ['.landscape-app-title', '.landscape-app-text'],
+                ['.landscape-title-bar .landscape-app-title', '.landscape-app-text'],
+                ['.landscape-app-title', '.landscape-app-info']
+            ];
+
+            for (let [hsel, dsel] of selPairs) {
+                try {
+                    const hEl = document.querySelector(hsel);
+                    const dEl = dsel ? document.querySelector(dsel) : null;
+                    const h = hEl ? (hEl.innerText || hEl.textContent) : null;
+                    const d = dEl ? (dEl.innerText || dEl.textContent) : null;
+                    const picked = pickIfValid(h, d);
+                    if (picked) return picked;
+                } catch(e){}
+            }
+
+            // Also try generic patterns from your sample:
+            const hAlt = document.querySelector('h1#ad-title, h1.discover__title, h1.discover_title, span#ad-title');
+            const dAlt = document.querySelector('h2#ad-description, h2.discover__description, div.discover__description');
+            if (hAlt) {
+                const picked = pickIfValid(hAlt.innerText || hAlt.textContent, dAlt ? (dAlt.innerText || dAlt.textContent) : null);
+                if (picked) return picked;
+            }
+        } catch(e){}
+
+        // If explicit selectors not found, fall back to the previous heuristic extractor:
         function isVisible(el){
             if(!el) return false;
             try{
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
-                return rect.width>0 && rect.height>0 && rect.bottom>0 && rect.right>0 && rect.top<window.innerHeight && rect.left<window.innerWidth && style.visibility!=='hidden' && style.display!=='none' && style.opacity!=='0';
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width>0 && r.height>0 && r.bottom>0 && r.right>0 && r.top < window.innerHeight && r.left < window.innerWidth && s.visibility!=='hidden' && s.display!=='none' && s.opacity!=='0';
             }catch(e){ return false; }
         }
 
         function hasInstallNearby(el){
             try{
                 let anc = el;
-                for(let depth=0; depth<6 && anc; depth++, anc = anc.parentElement){
+                for(let depth=0; depth<6 && anc; depth++, anc=anc.parentElement){
                     if(!anc) break;
                     const anchors = Array.from(anc.querySelectorAll('a[href], button, [role="link"]'));
                     for(let a of anchors){
@@ -738,53 +790,23 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                             const href = (a.getAttribute && (a.getAttribute('href')||a.getAttribute('data-href'))) || a.href || '';
                             const txt = (a.innerText||a.textContent||'').toLowerCase();
                             const hrefLower = (href||'').toLowerCase();
-                            if(hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')){
-                                return true;
-                            }
+                            if(hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')) return true;
                         }catch(e){}
                     }
                 }
-                let prev = el.previousElementSibling;
-                for(let i=0;i<5 && prev;i++, prev=prev.previousElementSibling){
-                    const anchors = Array.from(prev.querySelectorAll('a[href], button, [role="link"]'));
-                    for(let a of anchors){
-                        try{
-                            const href = (a.getAttribute && (a.getAttribute('href')||a.getAttribute('data-href'))) || a.href || '';
-                            const txt = (a.innerText||a.textContent||'').toLowerCase();
-                            const hrefLower = (href||'').toLowerCase();
-                            if(hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')){
-                                return true;
-                            }
-                        }catch(e){}
-                    }
-                }
-                let next = el.nextElementSibling;
-                for(let i=0;i<5 && next;i++, next=next.nextElementSibling){
-                    const anchors = Array.from(next.querySelectorAll('a[href], button, [role="link"]'));
-                    for(let a of anchors){
-                        try{
-                            const href = (a.getAttribute && (a.getAttribute('href')||a.getAttribute('data-href'))) || a.href || '';
-                            const txt = (a.innerText||a.textContent||'').toLowerCase();
-                            const hrefLower = (href||'').toLowerCase();
-                            if(hrefLower.includes('play.google.com') || hrefLower.includes('googleadservices.com') || hrefLower.includes('apps.apple.com') || txt.includes('install') || txt.includes('get') || txt.includes('download')){
-                                return true;
-                            }
-                        }catch(e){}
-                    }
-                }
-            }catch(e){}
-            return false;
+                return false;
+            }catch(e){ return false; }
         }
 
         function looksLikeCreativeContainer(el){
             try{
                 let anc = el;
-                for(let i=0;i<6 && anc;i++, anc=anc.parentElement){
+                for(let i=0;i<6 && anc;i++, anc = anc.parentElement){
                     if(!anc) break;
                     const cn = (anc.className||'').toLowerCase();
                     const idn = (anc.id||'').toLowerCase();
-                    if(cn.includes('creative')||cn.includes('ad-')||cn.includes('advert')||cn.includes('ad_')||cn.includes('ad ')) return true;
-                    if(idn.includes('creative')||idn.includes('ad-')||idn.includes('advert')) return true;
+                    if(cn.includes('creative')||cn.includes('ad-')||cn.includes('advert')||cn.includes('landscape')||cn.includes('discover')) return true;
+                    if(idn.includes('creative')||idn.includes('ad-')||idn.includes('advert')||idn.includes('landscape')||idn.includes('discover')) return true;
                 }
             }catch(e){}
             return false;
@@ -792,13 +814,12 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
 
         function collectTextCandidatesForImage(imgEl){
             const candidates = [];
-
             function pushCandidate(el, extra){
                 try{
                     if(!el) return;
                     if(!isVisible(el)) return;
                     const txt = clean(el.innerText||el.textContent||'');
-                    if(!txt || txt.length<2 || txt.length>500 || txt.includes('{{')) return;
+                    if(!txt || txt.length < 2 || txt.length > 500 || txt.includes('{{')) return;
                     const style = window.getComputedStyle(el);
                     const font = parseFloat(style.fontSize||'0')||0;
                     candidates.push({
@@ -810,7 +831,6 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                     });
                 }catch(e){}
             }
-
             try{
                 const alt = clean(imgEl.getAttribute('alt')||imgEl.getAttribute('title')||'');
                 if(alt){
@@ -818,29 +838,25 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                     candidates.push({text: alt, font:12, len: alt.length, installNearby: flag, creativeContainer: flag});
                 }
             }catch(e){}
-
             let s = imgEl.previousElementSibling;
             for(let i=0;i<6 && s;i++, s=s.previousElementSibling) pushCandidate(s, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
             s = imgEl.nextElementSibling;
             for(let i=0;i<6 && s;i++, s=s.nextElementSibling) pushCandidate(s, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
-
             let anc = imgEl.parentElement;
             for(let depth=0; depth<5 && anc; depth++, anc = anc.parentElement){
                 try{
-                    const h = anc.querySelector('figcaption, h1,h2,h3,h4, .headline, .title, .caption, .ad-caption, .creative-caption, .ad-title, .ad-headline');
+                    const h = anc.querySelector('figcaption, h1,h2,h3,h4, .headline, .title, .caption, .ad-caption, .creative-caption, .ad-title, .ad-headline, .discover__title, #ad-title, .landscape-app-title, #landscape-app-title');
                     if(h) pushCandidate(h, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
                     const leafs = Array.from(anc.querySelectorAll('*')).filter(e => e.childElementCount===0).slice(0,20);
                     for(let lf of leafs) pushCandidate(lf, {installNearby: hasInstallNearby(imgEl), creativeContainer: looksLikeCreativeContainer(imgEl)});
                 }catch(e){}
             }
-
             const uniq = {};
             const out = [];
             for(let c of candidates){
                 const k = c.text.slice(0,120);
                 if(!uniq[k]){ uniq[k] = true; out.push(c); }
             }
-
             out.sort((a,b) => {
                 const ia = a.installNearby?1:0, ib = b.installNearby?1:0;
                 if(ib-ia) return ib-ia;
@@ -849,10 +865,10 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                 if((b.font||0)-(a.font||0)) return (b.font||0)-(a.font||0);
                 return a.len - b.len;
             });
-
             return out;
         }
 
+        // fallback heuristic run if explicit selectors not found
         const imgs = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el=>{
             try{
                 const rect = el.getBoundingClientRect();
@@ -893,6 +909,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     start = time.time()
     end = start + max_wait_seconds
 
+    # Try explicit-selector check and heuristics inside ranked frames first
     try:
         ranked = get_ranked_non_video_targets(page)
     except Exception:
@@ -902,7 +919,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         if time.time() > end:
             break
         try:
-            res = None
+            # For iframe targets, evaluate inside the frame
             if kind == "iframe":
                 res = target.evaluate(js)
             else:
@@ -912,6 +929,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         except Exception:
             continue
 
+    # Fallback: evaluate on main page then on every frame
     while time.time() < end:
         try:
             res = page.evaluate(js)
@@ -919,6 +937,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                 return res.get("headline", "N/A"), res.get("description", "N/A")
         except Exception:
             pass
+
         for frame in page.frames:
             if time.time() > end:
                 break
@@ -928,7 +947,9 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
                     return res.get("headline", "N/A"), res.get("description", "N/A")
             except Exception:
                 continue
+
         page.wait_for_timeout(300)
+
     return "N/A", "N/A"
 
 
@@ -1320,7 +1341,7 @@ def _score_non_video_target(target):
         });
 
         const descNodes = Array.from(document.querySelectorAll(
-            '[class*="-e-67"], [class*="long-description"], [class*="description'], [aria-label*="Description"], [aria-label*="description"]'
+            '[class*="-e-67"], [class*="long-description"], [class*="description"], [aria-label*="Description"], [aria-label*="description"]'
         )).filter(el => {
             const txt = cleanText(el.innerText || el.textContent || '');
             return txt.length >= 8 && txt.length <= 260 && isVisible(el) && !txt.includes('{{');
@@ -1547,8 +1568,7 @@ def has_visible_image_creative(page):
             return isVisible(el);
         });
 
-        if (imageLike) return true;
-
+        if (imageLike) return True
         return Array.from(document.querySelectorAll('*')).some(el => {
             if (!isVisible(el)) return false;
             const bg = window.getComputedStyle(el).backgroundImage || '';
@@ -1557,6 +1577,7 @@ def has_visible_image_creative(page):
     }
     """
 
+    # Note: earlier bug: make sure True/False consistent between JS and Python.
     try:
         if page.evaluate(js):
             return True
