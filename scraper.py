@@ -634,135 +634,170 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
-# HEADLINE AND DESCRIPTION LOGIC - WITH IMAGE AD SUPPORT
+# HEADLINE AND DESCRIPTION LOGIC
 # =========================
 
-def wait_and_extract_text_ad_details(page, max_wait_seconds=15, lenient_mode=False):
+def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
     """
-    Extracts headline and description for non-video ads.
-    - Strict mode: Uses specific selectors for text ads.
-    - Lenient mode: Also extracts from larger visible text for image ads.
+    Extract headline/description for BOTH text ads and image ads.
+    Existing text-ad logic preserved.
     """
-    js_strict = r"""
+
+    js = r"""
     () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+
+        const cleanText = (txt) =>
+            (txt || "")
+            .replace(/\n/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
 
         const isVisible = (el) => {
             if (!el) return false;
+
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
+
+            return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.visibility !== 'hidden' &&
+                style.display !== 'none' &&
+                style.opacity !== '0'
+            );
         };
 
         let headline = "N/A";
         let description = "N/A";
 
-        // Main visible creative first - STRICT selectors
-        const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        // =========================
+        // EXISTING TEXT AD LOGIC
+        // =========================
+
+        const headlineEl =
+            document.querySelector(
+                'div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic'
+            );
+
         if (headlineEl && isVisible(headlineEl)) {
-            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
+            headline = cleanText(
+                headlineEl.innerText || headlineEl.textContent
+            );
         }
 
-        const descriptionEl = document.querySelector('div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        const descriptionEl =
+            document.querySelector(
+                'div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic'
+            );
+
         if (descriptionEl && isVisible(descriptionEl)) {
-            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
+            description = cleanText(
+                descriptionEl.innerText || descriptionEl.textContent
+            );
         }
 
-        return { headline, description };
-    }
-    """
+        // =========================
+        // IMAGE AD FALLBACK
+        // =========================
 
-    js_lenient = r"""
-    () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+        if (headline === "N/A" || description === "N/A") {
 
-        const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
+            const textBlocks = [];
+
+            document.querySelectorAll("*").forEach(el => {
+
+                if (!isVisible(el))
+                    return;
+
+                if (el.children.length > 0)
+                    return;
+
+                const txt = cleanText(
+                    el.innerText || el.textContent
+                );
+
+                if (!txt)
+                    return;
+
+                if (txt.length < 4)
+                    return;
+
+                if (txt.includes("Ads Transparency"))
+                    return;
+
+                if (txt.includes("See more ads"))
+                    return;
+
+                if (txt.length > 250)
+                    return;
+
+                textBlocks.push(txt);
+            });
+
+            if (headline === "N/A") {
+
+                const h = textBlocks.find(
+                    t => t.length >= 8 && t.length <= 80
+                );
+
+                if (h)
+                    headline = h;
+            }
+
+            if (description === "N/A") {
+
+                const d = textBlocks.find(
+                    t =>
+                        t !== headline &&
+                        t.length >= 20 &&
+                        t.length <= 200
+                );
+
+                if (d)
+                    description = d;
+            }
+        }
+
+        return {
+            headline,
+            description
         };
-
-        let headline = "N/A";
-        let description = "N/A";
-
-        // Try strict selectors first
-        const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
-        if (headlineEl && isVisible(headlineEl)) {
-            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
-        }
-
-        const descriptionEl = document.querySelector('div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
-        if (descriptionEl && isVisible(descriptionEl)) {
-            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
-        }
-
-        // Lenient fallback for image ads: find largest and second-largest visible text
-        if ((headline === "N/A" || headline === "") && (description === "N/A" || description === "")) {
-            const textElements = Array.from(document.querySelectorAll('body *'))
-                .filter(el => {
-                    if (el.childElementCount > 0) return false;
-                    const txt = cleanText(el.innerText || el.textContent || '');
-                    if (txt.length < 3 || txt.length > 220) return false;
-                    if (txt.includes('{{') || txt.includes('}}')) return false;
-                    const badWords = ['sign in', 'log in', 'home', 'menu', 'search', 'help', 'privacy', 'terms'];
-                    if (badWords.some(w => txt.toLowerCase().includes(w))) return false;
-                    return isVisible(el);
-                })
-                .map(el => {
-                    const font = parseFloat(window.getComputedStyle(el).fontSize || '0');
-                    const txt = cleanText(el.innerText || el.textContent || '');
-                    return { text: txt, fontSize: font, el: el };
-                })
-                .sort((a, b) => b.fontSize - a.fontSize);
-
-            if (textElements.length > 0 && textElements[0].fontSize > 10) {
-                headline = textElements[0].text;
-            }
-            if (textElements.length > 1 && textElements[1].fontSize > 9 && textElements[1].text !== headline) {
-                description = textElements[1].text;
-            }
-        }
-
-        return { headline, description };
     }
     """
 
-    def read_target(target, use_lenient=False):
+    def read_target(target):
         try:
-            script = js_lenient if use_lenient else js_strict
-            data = target.evaluate(script)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+            data = target.evaluate(js)
+            if data:
                 return data
         except Exception:
-            return None
+            pass
         return None
 
     start_time = time.time()
 
     while time.time() - start_time < max_wait_seconds:
-        # 1) Check main page DOM first
-        data = read_target(page, use_lenient=lenient_mode)
+
+        data = read_target(page)
+
         if data:
             return data
 
-        # 2) Fallback: check iframes
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
-            data = read_target(frame, use_lenient=lenient_mode)
+
+            data = read_target(frame)
+
             if data:
                 return data
 
         page.wait_for_timeout(1000)
 
-    return {"headline": "N/A", "description": "N/A"}
+    return {
+        "headline": "N/A",
+        "description": "N/A"
+    }
 
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
@@ -1215,8 +1250,77 @@ def get_ranked_non_video_targets(page):
     return ranked
 
 
+def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
+    """
+    Extracts headline and description for non-video ads.
+    - Prefers visible elements from the active creative (main DOM).
+    - Uses specific selectors: <div role="link">, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic
+    - Falls back to iframe if necessary.
+    - Relaxed visibility check to allow offscreen or special-language creatives (e.g., Arabic).
+    """
+    js = r"""
+    () => {
+        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+
+        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
+        const isVisible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 &&
+                   style.visibility !== 'hidden' &&
+                   style.display !== 'none' &&
+                   style.opacity !== '0';
+        };
+
+        let headline = "N/A";
+        let description = "N/A";
+
+        // 1️⃣ Main visible creative first
+        const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        if (headlineEl && isVisible(headlineEl)) {
+            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
+        }
+
+        const descriptionEl = document.querySelector('div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        if (descriptionEl && isVisible(descriptionEl)) {
+            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
+        }
+
+        return { headline, description };
+    }
+    """
+
+    def read_target(target):
+        try:
+            data = target.evaluate(js)
+            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+                return data
+        except Exception:
+            return None
+        return None
+
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_seconds:
+        # 1) Check main page DOM first (active visible creative)
+        data = read_target(page)
+        if data:
+            return data
+
+        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            data = read_target(frame)
+            if data:
+                return data
+
+        page.wait_for_timeout(1000)
+
+    return {"headline": "N/A", "description": "N/A"}
 # =========================
-# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS + IMAGE ADS
+# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
 
 def is_valid_text_ad(headline, description):
@@ -1401,21 +1505,9 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            # Try strict extraction first (for text ads)
-            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15, lenient_mode=False)
+            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
             headline = clean_text(text_data.get("headline"))
             description = clean_text(text_data.get("description"))
-            
-            # Check if this looks like an image ad
-            is_image_like = has_visible_image_creative(page)
-            
-            # If it's likely an image ad and strict extraction failed, try lenient extraction
-            if is_image_like and headline == "N/A" and description == "N/A":
-                print(f"🖼 Row {row_num}: image ad detected, trying lenient headline/description extraction")
-                text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=10, lenient_mode=True)
-                headline = clean_text(text_data.get("headline"))
-                description = clean_text(text_data.get("description"))
-            
             process_time = get_exact_time()
             has_text = is_valid_text_ad(headline, description)
 
@@ -1423,6 +1515,7 @@ def scrape_single_url(url_row):
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
+            is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
@@ -1455,7 +1548,7 @@ def scrape_single_url(url_row):
             if has_text:
                 print(f"🔎 Row {row_num}: text/image headline -> {headline}")
             else:
-                print(f"🖼 Row {row_num}: image ad detected, headline -> {headline}")
+                print(f"🖼 Row {row_num}: likely image ad, headline/description not found")
 
             print(f"📦 Row {row_num}: resolving package from visible install link first")
 
@@ -1470,11 +1563,17 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
-                # TRY STRICT MATCHING FOR BOTH TEXT AND IMAGE ADS
-                if has_text or is_image_like:
-                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
-                    all_found_packages = extract_package_from_page(page)
-                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+               if headline != "N/A" or description != "N/A":
+
+    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
+
+    all_found_packages = extract_package_from_page(page)
+
+    package_name, match_score = get_best_matching_package(
+        headline,
+        description,
+        all_found_packages
+    )
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
@@ -1499,7 +1598,11 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(row_num, headline if has_text else headline, description if has_text else description)
+           safe_update_headline_desc(
+    row_num,
+    headline,
+    description
+)
 
             safe_add_log(
                 row_number=row_num,
@@ -1562,7 +1665,7 @@ def run_parallel_combined_scraper(max_workers=2):
         print("No transparency URLs found in column H.")
         return
 
-    print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
+    print(f"🚀 Starting combined VIDEO + TEXT scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1589,7 +1692,7 @@ def run_parallel_combined_scraper(max_workers=2):
                 except Exception:
                     pass
 
-    print("✅ Finished combined video + text + image scraping")
+    print("✅ Finished combined video + text scraping")
 
 
 if __name__ == "__main__":
