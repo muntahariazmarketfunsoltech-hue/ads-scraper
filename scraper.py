@@ -781,146 +781,6 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-
-def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
-    """
-    Enhanced extraction for IMAGE ADS.
-    Searches for headline/description using patterns specific to image creative preview.
-    Works in iframes and main page using multiple selector strategies.
-    """
-    js = r"""
-    () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-
-        const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
-        };
-
-        let headline = "N/A";
-        let description = "N/A";
-
-        // Strategy 1: Look for text near/around visible images (image ad companion text)
-        const images = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
-            const src = String(el.getAttribute('src') || '').toLowerCase();
-            const alt = String(el.getAttribute('alt') || '').toLowerCase();
-            if (src.includes('googlelogo') || alt.includes('google')) return false;
-            return isVisible(el);
-        });
-
-        if (images.length > 0) {
-            // Find text elements near the image
-            let allText = Array.from(document.querySelectorAll('*')).filter(el => {
-                if (el.childElementCount > 0) return false;
-                const txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length < 2 || txt.length > 220) return false;
-                if (txt.includes('{{') || txt.includes('}}')) return false;
-                return isVisible(el);
-            });
-
-            // Extract headline (shorter text, typically 3-60 chars)
-            for (let el of allText) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 3 && txt.length <= 80 && !txt.toLowerCase().includes('download') && !txt.toLowerCase().includes('install')) {
-                    headline = txt;
-                    break;
-                }
-            }
-
-            // Extract description (longer text, typically 15-220 chars)
-            for (let el of allText) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 15 && txt.length <= 220 && txt !== headline && !txt.toLowerCase().includes('download') && !txt.toLowerCase().includes('install')) {
-                    description = txt;
-                    break;
-                }
-            }
-        }
-
-        // Strategy 2: Fallback to specific Google Ads class patterns
-        if (headline === "N/A") {
-            const headlineSelectors = [
-                '[class*="-e-15"]',
-                '[class*="headline"]',
-                '[class*="title"]',
-                'span[role="textbox"]',
-                'div[data-text-primary]'
-            ];
-            for (let selector of headlineSelectors) {
-                const els = document.querySelectorAll(selector);
-                for (let el of els) {
-                    if (isVisible(el)) {
-                        let txt = cleanText(el.innerText || el.textContent || '');
-                        if (txt.length >= 3 && txt.length <= 80 && !txt.includes('{{')) {
-                            headline = txt;
-                            break;
-                        }
-                    }
-                }
-                if (headline !== "N/A") break;
-            }
-        }
-
-        if (description === "N/A") {
-            const descSelectors = [
-                '[class*="-e-67"]',
-                '[class*="long-description"]',
-                '[class*="description"]',
-                'div[data-text-secondary]',
-                'span[role="textbox"]'
-            ];
-            for (let selector of descSelectors) {
-                const els = document.querySelectorAll(selector);
-                for (let el of els) {
-                    if (isVisible(el)) {
-                        let txt = cleanText(el.innerText || el.textContent || '');
-                        if (txt.length >= 8 && txt.length <= 220 && txt !== headline && !txt.includes('{{')) {
-                            description = txt;
-                            break;
-                        }
-                    }
-                }
-                if (description !== "N/A") break;
-            }
-        }
-
-        return { headline, description };
-    }
-    """
-
-    def read_target(target):
-        try:
-            data = target.evaluate(js)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
-        except Exception:
-            return None
-        return None
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-        # 1) Check all iframes first for image ad details
-        for frame in page.frames:
-            data = read_target(frame)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
-
-        # 2) Then check main page
-        data = read_target(page)
-        if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-            return data
-
-        page.wait_for_timeout(1000)
-
-    return {"headline": "N/A", "description": "N/A"}
-
-
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
@@ -1279,6 +1139,7 @@ def _score_non_video_target(target):
             const src = String(el.getAttribute('src') || '').toLowerCase();
             const alt = String(el.getAttribute('alt') || '').toLowerCase();
             if (src.includes('googlelogo') || alt.includes('google')) return false;
+            const rect = el.getBoundingClientRect();
             return isVisible(el) && rect.width >= 80 && rect.height >= 50;
         });
 
@@ -1560,25 +1421,15 @@ def scrape_single_url(url_row):
             text_data = wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15)
             headline = clean_text(text_data.get("headline"))
             description = clean_text(text_data.get("description"))
+            process_time = get_exact_time()
+            has_text = is_valid_text_ad(headline, description)
 
             # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
             is_image_like = has_visible_image_creative(page)
-            ad_type = "text" if headline != "N/A" else "image" if is_image_like else "N/A"
-            process_time = get_exact_time()
-
-            # For IMAGE ads, use enhanced extraction
-            if ad_type == "image":
-                print(f"🖼 Row {row_num}: image ad detected, extracting enhanced headline/description")
-                image_data = wait_and_extract_image_ad_details(page, max_wait_seconds=15)
-                headline = clean_text(image_data.get("headline"))
-                description = clean_text(image_data.get("description"))
-                print(f"🖼 Row {row_num}: image ad headline -> {headline}")
-                print(f"🖼 Row {row_num}: image ad description -> {description}")
-
-            has_text = is_valid_text_ad(headline, description)
+            ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
@@ -1607,9 +1458,9 @@ def scrape_single_url(url_row):
                 print(f"⏭ Row {row_num}: no video and no valid text/image ad found")
                 return
 
-            if headline != "N/A":
+            if has_text:
                 print(f"🔎 Row {row_num}: headline -> {headline}")
-            if ad_type == "image":
+            else:
                 print(f"🖼 Row {row_num}: image ad detected")
 
             # Try to extract package from page
