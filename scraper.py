@@ -1231,12 +1231,11 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
 
     return {"headline": "N/A", "description": "N/A"}
 
-    def extract_image_ad_text(page):
-    """
-    Image ads:
-    Lower large text = headline
-    Text directly below = description
-    """
+# =========================
+# IMAGE AD TEXT EXTRACTION
+# =========================
+
+def extract_image_ad_text(page):
 
     js = r"""
     () => {
@@ -1262,7 +1261,7 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
             );
         };
 
-        const results = [];
+        const nodes = [];
 
         document.querySelectorAll("*").forEach(el => {
 
@@ -1272,7 +1271,9 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
             if (el.children.length > 0)
                 return;
 
-            const text = clean(el.innerText || el.textContent);
+            const text = clean(
+                el.innerText || el.textContent
+            );
 
             if (!text)
                 return;
@@ -1283,14 +1284,15 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
             if (
                 text.includes("Ads Transparency") ||
                 text.includes("See more ads") ||
-                text.includes("Report this ad")
+                text.includes("Report this ad") ||
+                text.includes("Google")
             )
                 return;
 
             const rect = el.getBoundingClientRect();
 
-            results.push({
-                text,
+            nodes.push({
+                text: text,
                 y: rect.top,
                 size: parseFloat(
                     window.getComputedStyle(el).fontSize || "0"
@@ -1298,35 +1300,32 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
             });
         });
 
-        if (!results.length)
-            return {
-                headline: "N/A",
-                description: "N/A"
-            };
-
-        results.sort((a,b) => a.y - b.y);
+        nodes.sort((a,b) => a.y - b.y);
 
         let headline = "N/A";
         let description = "N/A";
 
-        for (let i=0;i<results.length;i++) {
+        for (let i = 0; i < nodes.length; i++) {
 
-            const txt = results[i].text;
+            const txt = nodes[i].text;
 
             if (
                 txt.length >= 15 &&
                 txt.length <= 120
             ) {
+
                 headline = txt;
 
-                for (let j=i+1;j<results.length;j++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+
+                    const nextTxt = nodes[j].text;
 
                     if (
-                        results[j].text !== headline &&
-                        results[j].text.length >= 10 &&
-                        results[j].text.length <= 200
+                        nextTxt !== headline &&
+                        nextTxt.length >= 10 &&
+                        nextTxt.length <= 200
                     ) {
-                        description = results[j].text;
+                        description = nextTxt;
                         break;
                     }
                 }
@@ -1343,12 +1342,28 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
     """
 
     try:
-        return page.evaluate(js)
-    except:
-        return {
-            "headline": "N/A",
-            "description": "N/A"
-        }
+        result = page.evaluate(js)
+
+        if result:
+            return result
+
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            result = frame.evaluate(js)
+
+            if result:
+                return result
+
+        except Exception:
+            continue
+
+    return {
+        "headline": "N/A",
+        "description": "N/A"
+    }
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1535,11 +1550,20 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
-            headline = clean_text(text_data.get("headline"))
-            description = clean_text(text_data.get("description"))
-            process_time = get_exact_time()
-            has_text = is_valid_text_ad(headline, description)
+           text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
+
+headline = clean_text(text_data.get("headline"))
+description = clean_text(text_data.get("description"))
+
+if headline == "N/A" and description == "N/A":
+
+    image_data = extract_image_ad_text(page)
+
+    headline = clean_text(image_data.get("headline"))
+    description = clean_text(image_data.get("description"))
+
+process_time = get_exact_time()
+has_text = is_valid_text_ad(headline, description)
 
             # First try visible install/app link from the active creative.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
@@ -1575,7 +1599,7 @@ def scrape_single_url(url_row):
                 print(f"⏭ Row {row_num}: no video and no valid text/image ad found")
                 return
 
-            if has_text:
+           if headline != "N/A" or description != "N/A":
                 print(f"🔎 Row {row_num}: text/image headline -> {headline}")
             else:
                 print(f"🖼 Row {row_num}: likely image ad, headline/description not found")
@@ -1628,7 +1652,11 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
+            safe_update_headline_desc(
+    row_num,
+    headline,
+    description
+)
 
             safe_add_log(
                 row_number=row_num,
