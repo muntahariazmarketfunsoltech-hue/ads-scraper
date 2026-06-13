@@ -633,87 +633,184 @@ def wait_and_extract_install_link(page, max_wait_seconds=35):
 
 
 # =========================
-# HEADLINE AND DESCRIPTION LOGIC
+# HEADLINE AND DESCRIPTION LOGIC (IMPROVED)
 # =========================
 
 def wait_and_extract_headline_description(page, max_wait_seconds=15):
     """
-    Polls for Headline and Description inside iframes ONLY.
-    Uses structural class patterns (-e-15, -e-67) and visibility checks 
-    to avoid grabbing hidden template text.
+    Extract headline + description preferring title-like selectors first.
+    - Checks ranked iframe targets first (iframe-first behavior).
+    - Uses strong selectors for titles (#ad-title, *app-title*, h1/h2).
+    - Uses description selectors (#ad-description, *description*, p, known classes).
+    - If headline ends up being install-text, swaps headline/description when sensible.
     """
     js = r"""
     () => {
-        let headText = "N/A";
-        let descText = "N/A";
-
-        // Helper to ensure we don't grab hidden/template elements
-        const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+        const clean = s => (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim();
+        const isVisible = el => {
+            if(!el) return false;
+            try{
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+            }catch(e){ return false; }
         };
 
-        // SEARCH HEADLINE: Matches any class containing '-e-15' OR 'headline'
-        const headNodes = document.querySelectorAll('[class*="-e-15"], [class*="headline"]');
-        for (let el of headNodes) {
-            if (isVisible(el)) {
-                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
-                // Ensure it's not a template placeholder like {{headline}}
-                if (text.length > 1 && !text.includes('{{')) { 
-                    headText = text; 
-                    break; 
+        const trySelectors = (selectors) => {
+            for(const sel of selectors){
+                try{
+                    const nodes = Array.from(document.querySelectorAll(sel));
+                    for(const n of nodes){
+                        if(!isVisible(n)) continue;
+                        const txt = clean(n.innerText || n.textContent || '');
+                        if(txt && txt.length >= 2 && !txt.includes('{{')) return txt;
+                    }
+                }catch(e){}
+            }
+            return null;
+        };
+
+        const headline_selectors = [
+            '#ad-title',
+            '[id*="app-title"]',
+            '[class*="app-title"]',
+            '[class*="ad-title"]',
+            '[class*="title"]',
+            '[class*="headline"]',
+            'h1',
+            'h2',
+            'div[role="heading"]',
+            'div[role="link"] span'
+        ];
+
+        const desc_selectors = [
+            '#ad-description',
+            '[class*="description"]',
+            '[class*="desc"]',
+            'div.cS4Vcb-vnv8ic',
+            'div.HFTpmd-WsjYwc-hgDUwe',
+            'p',
+            'span'
+        ];
+
+        let headline = trySelectors(headline_selectors) || "N/A";
+        let description = trySelectors(desc_selectors) || "N/A";
+
+        // If headline missing but description exists, try to find a nearby title node around description nodes
+        if((!headline || headline === 'N/A') && description && description !== 'N/A'){
+            try{
+                for(const sel of desc_selectors){
+                    const descNodes = Array.from(document.querySelectorAll(sel)).filter(isVisible);
+                    for(const dn of descNodes){
+                        // check previous siblings
+                        let prev = dn.previousElementSibling;
+                        for(let i=0;i<6 && prev;i++, prev = prev.previousElementSibling){
+                            try{
+                                for(const hsel of headline_selectors){
+                                    if(prev.matches && prev.matches(hsel) && isVisible(prev)){
+                                        const t = clean(prev.innerText || prev.textContent || '');
+                                        if(t && !t.includes('{{')) { headline = t; break; }
+                                    }
+                                }
+                            }catch(e){}
+                        }
+                        if(headline && headline !== 'N/A') break;
+                        // check parents for title-like nodes
+                        let p = dn.parentElement;
+                        for(let depth=0; depth<6 && p; depth++, p = p.parentElement){
+                            try{
+                                for(const hsel of headline_selectors){
+                                    const found = p.querySelector && p.querySelector(hsel);
+                                    if(found && isVisible(found)){
+                                        const t = clean(found.innerText || found.textContent || '');
+                                        if(t && !t.includes('{{')) { headline = t; break; }
+                                    }
+                                }
+                            }catch(e){}
+                            if(headline && headline !== 'N/A') break;
+                        }
+                        if(headline && headline !== 'N/A') break;
+                    }
+                    if(headline && headline !== 'N/A') break;
+                }
+            }catch(e){}
+        }
+
+        // Small safety swap heuristic when extractor picked an "Install..." line as headline:
+        try{
+            const lowerH = (headline || '').toLowerCase();
+            const lowerD = (description || '').toLowerCase();
+            const installWords = ['install','get','download'];
+            const hHasInstall = installWords.some(w => lowerH.includes(w));
+            const dHasInstall = installWords.some(w => lowerD.includes(w));
+            // If headline looks like install text but description does not, and description is short/looks like a title, swap
+            if(headline && description && hHasInstall && !dHasInstall){
+                const swapIfLooksLikeTitle = (str) => {
+                    const len = (str||'').trim().length;
+                    return len > 2 && len < 120;
+                };
+                if(swapIfLooksLikeTitle(description)){
+                    const tmp = headline; headline = description; description = tmp;
                 }
             }
-        }
+        }catch(e){}
 
-        // SEARCH DESCRIPTION: Matches any class containing '-e-67' OR 'long-description'
-        const descNodes = document.querySelectorAll('[class*="-e-67"], [class*="long-description"]');
-        for (let el of descNodes) {
-            if (isVisible(el)) {
-                let text = (el.innerText || el.textContent || "").replace(/\n/g, ' ').trim();
-                if (text.length > 1 && text !== headText && !text.includes('{{')) { 
-                    descText = text; 
-                    break; 
-                }
-            }
-        }
-
-        // If we found either one, return it
-        if (headText !== "N/A" || descText !== "N/A") {
-            return { headline: headText, description: descText };
-        }
-
+        if(headline === 'N/A' && description !== 'N/A') return { headline: 'N/A', description };
+        if(headline !== 'N/A' || description !== 'N/A') return { headline, description };
         return null;
     }
     """
 
     start = time.time()
-    
-    # Retry loop: Keeps trying for up to max_wait_seconds (15s)
-    while time.time() - start < max_wait_seconds:
-        
-        # STRICTLY CHECK IFRAMES ONLY.
+    end = start + max_wait_seconds
+
+    # Try ranked frames first (iframe-first behavior)
+    try:
+        ranked = get_ranked_non_video_targets(page)
+    except Exception:
+        ranked = []
+
+    for score, target, kind, info in ranked:
+        if time.time() > end:
+            break
+        try:
+            if kind == "iframe":
+                res = target.evaluate(js)
+            else:
+                res = page.evaluate(js)
+            if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
+                return res.get("headline", "N/A"), res.get("description", "N/A")
+        except Exception:
+            continue
+
+    # fallback to main page then frames with retries
+    while time.time() < end:
+        try:
+            res = page.evaluate(js)
+            if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
+                return res.get("headline", "N/A"), res.get("description", "N/A")
+        except Exception:
+            pass
+
         for frame in page.frames:
+            if time.time() > end:
+                break
             try:
-                result = frame.evaluate(js)
-                if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
-                    return result.get("headline", "N/A"), result.get("description", "N/A")
+                res = frame.evaluate(js)
+                if res and (res.get("headline", "N/A") != "N/A" or res.get("description", "N/A") != "N/A"):
+                    return res.get("headline", "N/A"), res.get("description", "N/A")
             except Exception:
                 continue
-        
-        # Wait 1 second and loop again to let the ad iframe fully load
+
         page.wait_for_timeout(1000)
 
-    # If the timer runs out, return N/A
     return "N/A", "N/A"
 
 
 # =========================
 # IMAGE-AD HEADLINE/DESCRIPTION EXTRACTOR (fallback)
 # =========================
-# keep the image extractor as a lower-priority fallback (already present in your code)
+# keep the image extractor as a lower-priority fallback
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     js = r"""
     () => {
@@ -1065,7 +1162,6 @@ def get_best_matching_package(headline, description, package_list, min_score=MIN
 
     return None, best_score
 
-
 def decode_all(text):
     """Decode every encoding variant so no package name is missed."""
     text = re.sub(r'\\x3[Dd]', '=', text)
@@ -1175,55 +1271,6 @@ def extract_package_from_page(page):
     combined = '\n'.join(collected_texts)
     return extract_packages_from_text(combined)
 
-
-def extract_packages_from_ranked_frames(page, max_frames=5):
-    """
-    Run package extraction on the most likely non-video targets (iframes + page).
-    Returns a set of candidate package names found (using existing extract_packages_from_text).
-    """
-    all_found = set()
-
-    try:
-        ranked = get_ranked_non_video_targets(page)
-    except Exception:
-        ranked = []
-
-    # include main page as last fallback
-    targets = [t for _, t, _, _ in ranked[:max_frames]]
-    if page not in targets:
-        targets.append(page)
-
-    for target in targets:
-        try:
-            # grab outerHTML, hrefs, and visible text from that target
-            html = ""
-            try:
-                html = target.evaluate("() => document.documentElement ? document.documentElement.outerHTML : ''")
-            except Exception:
-                pass
-            hrefs = ""
-            try:
-                hrefs_list = target.evaluate("""() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)""")
-                if hrefs_list:
-                    hrefs = "\n".join(hrefs_list)
-            except Exception:
-                pass
-            visible_text = ""
-            try:
-                visible_text = target.evaluate("() => document.body ? document.body.innerText : ''")
-            except Exception:
-                pass
-
-            combined = "\n".join([html or "", hrefs or "", visible_text or ""])
-            if combined and len(combined) > 10:
-                found = extract_packages_from_text(combined)
-                all_found.update(found)
-        except Exception:
-            continue
-
-    return all_found
-
-
 def extract_advertiser_from_page(page):
     try:
         loc = page.locator('.advertiser-title, [data-test-id="advertiser-name"]').first
@@ -1320,7 +1367,7 @@ def _score_non_video_target(target):
         });
 
         const descNodes = Array.from(document.querySelectorAll(
-            '[class*="-e-67"], [class*="long-description"], [class*="description'], [aria-label*="Description"], [aria-label*="description"]'
+            '[class*="-e-67"], [class*="long-description"], [class*="description"], [aria-label*="Description"], [aria-label*="description"]'
         )).filter(el => {
             const txt = cleanText(el.innerText || el.textContent || '');
             return txt.length >= 8 && txt.length <= 260 && isVisible(el) && !txt.includes('{{');
@@ -1502,8 +1549,6 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-
-
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1514,7 +1559,6 @@ def is_valid_text_ad(headline, description):
     if description and description != "N/A" and len(clean_text(description)) >= 15:
         return True
     return False
-
 
 def has_visible_image_creative(page):
     """
@@ -1704,12 +1748,9 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
-            # NEW: For image-like creatives, first use exactly the same text-ad extraction
-            # method used for text creatives (iframe-first selectors). Fallback to image
-            # heuristic only if that fails.
-            image_extractor_used = False  # flag: set only when the image-specific extractor provided the accepted text
+            # For image-like creatives, first use the same text-ad extraction method (iframe-first)
+            # Fallback to the image-specific extractor only if the text-ad extraction didn't find valid text.
             if not has_text and is_image_like:
-                # 1) try the text-ad extractor (same method used for text ads)
                 img_text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
                 img_head = clean_text(img_text_data.get("headline"))
                 img_desc = clean_text(img_text_data.get("description"))
@@ -1720,12 +1761,10 @@ def scrape_single_url(url_row):
                     has_text = True
                     print(f"🖼 Row {row_num}: image ad -> extracted via text-ad method: {headline} | {description}")
                 else:
-                    # 2) fallback to the image-specific extractor (shorter timeout)
                     img_head2, img_desc2 = wait_and_extract_image_ad_details(page, max_wait_seconds=6)
                     img_head2 = clean_text(img_head2)
                     img_desc2 = clean_text(img_desc2)
 
-                    # DEBUG log the candidate from image extractor
                     try:
                         if img_head2 != "N/A" or img_desc2 != "N/A":
                             safe_add_log(
@@ -1742,7 +1781,6 @@ def scrape_single_url(url_row):
                         headline = img_head2
                         description = img_desc2
                         has_text = True
-                        image_extractor_used = True  # mark that we used image extractor fallback
                         print(f"🖼 Row {row_num}: image ad -> extracted via image heuristic fallback: {headline} | {description}")
                     else:
                         print(f"🖼 Row {row_num}: image ad -> no headline/description found by text-ad method or image fallback")
@@ -1759,14 +1797,9 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
-                # Attempt frame-targeted package extraction first
-                all_found_packages = extract_packages_from_ranked_frames(page)
-                if not all_found_packages:
-                    # fallback to previous page-wide extraction
-                    all_found_packages = extract_package_from_page(page)
-
-                if has_text and all_found_packages:
+                if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
+                    all_found_packages = extract_package_from_page(page)
                     package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
 
                 if package_name:
@@ -1791,28 +1824,8 @@ def scrape_single_url(url_row):
                 process_time
             ]
 
-            # If this row is an image ad and the image-specific extractor (fallback) was used,
-            # swap headline/description before saving. This addresses cases where the image
-            # extractor returns the top text and the below text in reversed order for sheet columns.
-            save_headline = headline if has_text else "N/A"
-            save_description = description if has_text else "N/A"
-
-            if ad_type == "image" and image_extractor_used and save_headline != "N/A":
-                # Only swap when the image-specific extractor was the source of the text.
-                save_headline, save_description = save_description, save_headline
-                try:
-                    safe_add_log(
-                        row_number=row_num,
-                        status="IMAGE_SWAP_APPLIED",
-                        log_type="IMAGE_AD",
-                        url=url,
-                        message=f"Swapped headline/description for image ad due to image-extractor ordering (headline_now='{save_headline[:120]}')"
-                    )
-                except Exception:
-                    pass
-
             safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(row_num, save_headline, save_description)
+            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
 
             safe_add_log(
                 row_number=row_num,
