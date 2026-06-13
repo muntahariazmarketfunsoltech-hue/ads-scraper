@@ -744,41 +744,41 @@ def scrape_single_url(url_row):
 
             print(f"✅ Row {row_num}: saved NON-VIDEO {ad_type} ad advertiser + package + headline + description")
 
-        except Exception as e:
-            error_time = get_exact_time()
-            print(f"❌ Row {row_num} error at {error_time}: {e}")
+    except Exception as e:
+        error_time = get_exact_time()
+        print(f"❌ Row {row_num} error at {error_time}: {e}")
 
-            try:
-                data = [
-                    "",
-                    "N/A",
-                    url,
-                    "ERROR",
-                    error_time,
-                    "ERROR",
-                    error_time
-                ]
+        try:
+            data = [
+                "",
+                "N/A",
+                url,
+                "ERROR",
+                error_time,
+                "ERROR",
+                error_time
+            ]
 
-                safe_update_combined_row(row_num, data)
-                safe_update_headline_desc(row_num, "N/A", "N/A")
-            except Exception:
-                pass
+            safe_update_combined_row(row_num, data)
+            safe_update_headline_desc(row_num, "N/A", "N/A")
+        except Exception:
+            pass
 
-            try:
-                safe_add_log(
-                    row_number=row_num,
-                    status="ERROR",
-                    log_type="COMBINED",
-                    url=url,
-                    message=str(e)
-                )
-            except Exception:
-                pass
+        try:
+            safe_add_log(
+                row_number=row_num,
+                status="ERROR",
+                log_type="COMBINED",
+                url=url,
+                message=str(e)
+            )
+        except Exception:
+            pass
 
-        finally:
-            page.close()
-            context.close()
-            browser.close()
+    finally:
+        page.close()
+        context.close()
+        browser.close()
 
 def run_parallel_combined_scraper(max_workers=2):
     urls = sheets.get_urls_with_retry()
