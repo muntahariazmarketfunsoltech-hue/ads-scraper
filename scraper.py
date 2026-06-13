@@ -710,77 +710,6 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
     # If the timer runs out, return N/A
     return "N/A", "N/A"
 
-
-def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
-    """
-    Extracts headline and description for non-video ads (including image ads).
-    - Prefers visible elements from the active creative (main DOM).
-    - Uses specific selectors: <div role="link">, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic
-    - Falls back to iframe if necessary.
-    - Relaxed visibility check to allow offscreen or special-language creatives (e.g., Arabic).
-    """
-    js = r"""
-    () => {
-        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-
-        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
-        const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   style.visibility !== 'hidden' &&
-                   style.display !== 'none' &&
-                   style.opacity !== '0';
-        };
-
-        let headline = "N/A";
-        let description = "N/A";
-
-        // 1️⃣ Main visible creative first
-        const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
-        if (headlineEl && isVisible(headlineEl)) {
-            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
-        }
-
-        const descriptionEl = document.querySelector('div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
-        if (descriptionEl && isVisible(descriptionEl)) {
-            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
-        }
-
-        return { headline, description };
-    }
-    """
-
-    def read_target(target):
-        try:
-            data = target.evaluate(js)
-            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
-                return data
-        except Exception:
-            return None
-        return None
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait_seconds:
-        # 1) Check main page DOM first (active visible creative)
-        data = read_target(page)
-        if data:
-            return data
-
-        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            data = read_target(frame)
-            if data:
-                return data
-
-        page.wait_for_timeout(1000)
-
-    return {"headline": "N/A", "description": "N/A"}
-
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
@@ -1231,8 +1160,78 @@ def get_ranked_non_video_targets(page):
     ranked.sort(key=lambda item: item[0], reverse=True)
     return ranked
 
+
+def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
+    """
+    Extracts headline and description for non-video ads.
+    - Prefers visible elements from the active creative (main DOM).
+    - Uses specific selectors: <div role="link">, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic
+    - Falls back to iframe if necessary.
+    - Relaxed visibility check to allow offscreen or special-language creatives (e.g., Arabic).
+    """
+    js = r"""
+    () => {
+        const cleanText = (txt) => (txt || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+
+        // RELAXED visibility: ignore offscreen top/bottom/left/right but still require positive width/height
+        const isVisible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 &&
+                   style.visibility !== 'hidden' &&
+                   style.display !== 'none' &&
+                   style.opacity !== '0';
+        };
+
+        let headline = "N/A";
+        let description = "N/A";
+
+        // 1️⃣ Main visible creative first
+        const headlineEl = document.querySelector('div[role="link"] span, div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        if (headlineEl && isVisible(headlineEl)) {
+            headline = cleanText(headlineEl.innerText || headlineEl.textContent);
+        }
+
+        const descriptionEl = document.querySelector('div.HFTpmd-WsjYwc-hgDUwe, div.cS4Vcb-vnv8ic');
+        if (descriptionEl && isVisible(descriptionEl)) {
+            description = cleanText(descriptionEl.innerText || descriptionEl.textContent);
+        }
+
+        return { headline, description };
+    }
+    """
+
+    def read_target(target):
+        try:
+            data = target.evaluate(js)
+            if data and (data.get("headline") != "N/A" or data.get("description") != "N/A"):
+                return data
+        except Exception:
+            return None
+        return None
+
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_seconds:
+        # 1) Check main page DOM first (active visible creative)
+        data = read_target(page)
+        if data:
+            return data
+
+        # 2) Fallback: check iframes only if main DOM didn't yield headline/description
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            data = read_target(frame)
+            if data:
+                return data
+
+        page.wait_for_timeout(1000)
+
+    return {"headline": "N/A", "description": "N/A"}
 # =========================
-# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS + IMAGE ADS
+# MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
 
 def is_valid_text_ad(headline, description):
@@ -1367,7 +1366,7 @@ def scrape_single_url(url_row):
             video_time = get_exact_time()
 
             # =========================
-            # VIDEO AD PATH (UNCHANGED)
+            # VIDEO AD PATH
             # =========================
             if video_id != "N/A":
                 print(f"🎬 Row {row_num}: video ID found first: {video_id}")
@@ -1417,8 +1416,7 @@ def scrape_single_url(url_row):
             # =========================
             print(f"📄 Row {row_num}: no video found, checking text/image ad")
 
-            # Try to extract headline/description using the relaxed extractor for both text and image ads
-            text_data = wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15)
+            text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
             headline = clean_text(text_data.get("headline"))
             description = clean_text(text_data.get("description"))
             process_time = get_exact_time()
@@ -1459,55 +1457,39 @@ def scrape_single_url(url_row):
                 return
 
             if has_text:
-                print(f"🔎 Row {row_num}: headline -> {headline}")
+                print(f"🔎 Row {row_num}: text/image headline -> {headline}")
             else:
-                print(f"🖼 Row {row_num}: image ad detected")
+                print(f"🖼 Row {row_num}: likely image ad, headline/description not found")
 
-            # Try to extract package from page
-            print(f"📦 Row {row_num}: extracting packages from page...")
-            all_found_packages = extract_package_from_page(page)
-
-            # Package resolution logic (for both text and image ads)
-            package_name = None
-            match_score = 0.0
-            status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-            message = ""
+            print(f"📦 Row {row_num}: resolving package from visible install link first")
 
             if visible_package != "N/A":
-                # Priority 1: Visible install link package
                 package_name = visible_package
                 app_link = visible_app_link
                 match_score = 1.0
                 status = "SUCCESS"
                 message = f"Non-video {ad_type} ad package extracted from visible install link"
                 print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
+            else:
+                package_name = None
+                match_score = 0.0
 
-            elif has_text and all_found_packages:
-                # Priority 2: Strict matching for text ads or image ads with extracted text
-                print(f"📦 Row {row_num}: strict matching headline + description against {len(all_found_packages)} packages (threshold 0.76)")
-                matched_pkg, score = get_best_matching_package(headline, description, all_found_packages)
-                
-                if matched_pkg and score >= MIN_PACKAGE_MATCH_SCORE:
-                    package_name = matched_pkg
+                if has_text:
+                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
+                    all_found_packages = extract_package_from_page(page)
+                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+
+                if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
-                    match_score = score
                     status = "SUCCESS"
                     message = f"Non-video {ad_type} ad package strictly matched with score {match_score}"
                     print(f"✅ Row {row_num}: strict matched package -> {package_name} | score={match_score}")
                 else:
-                    best_score = score
                     package_name = "N/A"
                     app_link = "N/A"
                     status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={best_score}"
-                    print(f"⚠️ Row {row_num}: package score below threshold -> best score={best_score}")
-
-            else:
-                package_name = "N/A"
-                app_link = "N/A"
-                status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                message = f"Non-video {ad_type} ad found, but no matching package"
-                print(f"⚠️ Row {row_num}: no suitable package found")
+                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
+                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
 
             data = [
                 advertiser,
@@ -1520,8 +1502,7 @@ def scrape_single_url(url_row):
             ]
 
             safe_update_combined_row(row_num, data)
-            # Update headline/description for ALL non-video ads (text and image)
-            safe_update_headline_desc(row_num, headline, description)
+            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
 
             safe_add_log(
                 row_number=row_num,
@@ -1533,7 +1514,7 @@ def scrape_single_url(url_row):
                 message=message
             )
 
-            print(f"✅ Row {row_num}: saved NON-VIDEO {ad_type} ad with headline + description + package")
+            print(f"✅ Row {row_num}: saved NON-VIDEO {ad_type} ad advertiser + package + headline + description")
 
         except Exception as e:
             error_time = get_exact_time()
@@ -1584,7 +1565,7 @@ def run_parallel_combined_scraper(max_workers=2):
         print("No transparency URLs found in column H.")
         return
 
-    print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
+    print(f"🚀 Starting combined VIDEO + TEXT scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1611,7 +1592,7 @@ def run_parallel_combined_scraper(max_workers=2):
                 except Exception:
                     pass
 
-    print("✅ Finished combined video + text + image scraping")
+    print("✅ Finished combined video + text scraping")
 
 
 if __name__ == "__main__":
