@@ -1230,120 +1230,6 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-# ---------------------------
-# NEW: IMAGE AD headline/description extraction (non-invasive)
-# ---------------------------
-
-def wait_and_extract_image_ad_details(page, max_wait_seconds=12):
-    """
-    Attempt to extract headline + description for image/display creatives.
-    Strategy:
-     - Find visible image-like elements (img, picture, svg, canvas) in main page and frames.
-     - For each visible image, search up to 3 parent levels and look for leaf text nodes close to the image.
-     - Prefer the closest text element vertically to the image as HEADLINE, and the next nearest / longer text as DESCRIPTION.
-     - Return ("N/A","N/A") if nothing useful is found.
-    This function is only used for image ads and does not change text/video logic.
-    """
-    js = r"""
-    () => {
-        const clean = s => (s||'').replace(/\n/g,' ').replace(/\s+/g,' ').trim();
-        const isVisible = (el) => {
-            if (!el || !el.getBoundingClientRect) return false;
-            const r = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return r.width >= 80 && r.height >= 50 && r.bottom > 0 && r.right > 0 &&
-                   r.top < window.innerHeight && style.visibility !== 'hidden' &&
-                   style.display !== 'none' && style.opacity !== '0';
-        };
-
-        const findNearbyTextInContainer = (img) => {
-            const imgRect = img.getBoundingClientRect();
-            // gather leaf nodes (no children) to avoid container noise
-            const leafCandidates = Array.from((img.closest('body') || document).querySelectorAll('*'))
-                .filter(el => el.childElementCount === 0)
-                .map(el => {
-                    const txt = clean(el.innerText || el.textContent || '');
-                    const rect = el.getBoundingClientRect();
-                    return { el, txt, rect, len: txt.length };
-                })
-                .filter(c => c.txt.length >= 3 && c.rect.width > 10 && c.rect.height > 6);
-            if (!leafCandidates.length) return null;
-
-            // score by vertical distance + prefer longer text
-            leafCandidates.forEach(c => {
-                const cy = (c.rect.top + c.rect.bottom) / 2;
-                const icy = (imgRect.top + imgRect.bottom) / 2;
-                c.dist = Math.abs(cy - icy);
-                c.score = (10000 / (1 + c.dist)) + (c.len); // heuristic
-            });
-
-            leafCandidates.sort((a, b) => b.score - a.score);
-            const head = leafCandidates[0] ? leafCandidates[0].txt : '';
-            const desc = leafCandidates.slice(1, 4).map(x => x.txt).join(' ');
-            return { head: head || 'N/A', desc: desc || 'N/A' };
-        };
-
-        // Strategy: for each visible image find the best text nearby using container-first approach
-        const images = Array.from(document.querySelectorAll('img, picture, svg, canvas')).filter(isVisible);
-        for (const img of images) {
-            // Check text inside same immediate parent/same container first
-            let container = img.parentElement;
-            for (let lvl = 0; lvl < 3 && container; lvl++) {
-                const texts = Array.from(container.querySelectorAll('*'))
-                    .filter(el => el.childElementCount === 0)
-                    .map(el => ({ txt: clean(el.innerText || el.textContent || ''), rect: el.getBoundingClientRect(), len: (el.innerText || '').trim().length }))
-                    .filter(t => t.txt.length >= 3 && t.rect.width > 10 && t.rect.height > 6);
-
-                if (texts.length) {
-                    // choose nearest-by-vertical-distance candidate(s)
-                    texts.forEach(t => {
-                        const cy = (t.rect.top + t.rect.bottom) / 2;
-                        const icy = (img.getBoundingClientRect().top + img.getBoundingClientRect().bottom) / 2;
-                        t.dist = Math.abs(cy - icy);
-                    });
-                    texts.sort((a, b) => a.dist - b.dist || b.len - a.len);
-                    const headline = texts[0] ? texts[0].txt : '';
-                    const description = texts.slice(1, 3).map(t => t.txt).join(' ');
-                    if (headline) return { headline: headline, description: description || 'N/A' };
-                }
-
-                container = container.parentElement;
-            }
-
-            // fallback: global nearest leaf text to this image
-            const global = findNearbyTextInContainer(img);
-            if (global && (global.head !== '' || global.desc !== '')) {
-                return { headline: global.head || 'N/A', description: global.desc || 'N/A' };
-            }
-        }
-
-        return { headline: 'N/A', description: 'N/A' };
-    }
-    """
-
-    start = time.time()
-    while time.time() - start < max_wait_seconds:
-        # main page first
-        try:
-            result = page.evaluate(js)
-            if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
-                return result.get("headline", "N/A"), result.get("description", "N/A")
-        except Exception:
-            pass
-
-        # then check frames
-        for frame in page.frames:
-            try:
-                result = frame.evaluate(js)
-                if result and (result.get("headline", "N/A") != "N/A" or result.get("description", "N/A") != "N/A"):
-                    return result.get("headline", "N/A"), result.get("description", "N/A")
-            except Exception:
-                continue
-
-        page.wait_for_timeout(800)
-
-    return "N/A", "N/A"
-
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1410,6 +1296,153 @@ def has_visible_image_creative(page):
             continue
 
     return False
+
+
+def extract_headline_description_for_image_ad(page, max_wait_seconds=8):
+    """
+    New logic to get headline + description for image ads:
+    - Look for visible image-like elements and search their parents/ancestors for visible text nodes
+    - Avoid using 'install', 'get', 'download' as headline
+    - Returns (headline, description) or ("N/A","N/A")
+    """
+    js = r"""
+    () => {
+        const clean = (s) => (s || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+        const isBadText = (t) => {
+            if (!t) return true;
+            const lower = t.toLowerCase();
+            if (lower === "install" || lower === "get" || lower === "download") return true;
+            if (lower.includes("install") || lower.includes("download") || lower.includes("get")) return true;
+            return false;
+        };
+        const isVisible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 &&
+                rect.bottom > 0 && rect.right > 0 &&
+                rect.top < window.innerHeight && rect.left < window.innerWidth &&
+                style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+        };
+
+        // Helper: gather candidate leaf text nodes from a root element
+        const gather_texts = (root) => {
+            const arr = [];
+            if (!root) return arr;
+            const leaves = Array.from(root.querySelectorAll('*')).filter(el => el.childElementCount === 0);
+            for (let el of leaves) {
+                try {
+                    const txt = clean(el.innerText || el.textContent || "");
+                    if (!txt) continue;
+                    if (txt.includes('{{') || txt.includes('}}')) continue;
+                    if (txt.length < 2 || txt.length > 180) continue;
+                    if (!isVisible(el)) continue;
+                    if (isBadText(txt)) continue;
+                    arr.push(txt);
+                } catch (e) {
+                    continue;
+                }
+            }
+            return arr;
+        };
+
+        // 1) Find visible image-like elements and try nearby text
+        const imgs = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
+            try {
+                const src = String(el.getAttribute('src') || '').toLowerCase();
+                const alt = String(el.getAttribute('alt') || '').toLowerCase();
+                if (src.includes('googlelogo') || alt.includes('google')) return false;
+                return isVisible(el);
+            } catch (e) {
+                return false;
+            }
+        });
+
+        for (let img of imgs) {
+            // examine parent and ancestors up to 4 levels
+            let node = img.parentElement;
+            let collected = [];
+            for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
+                const texts = gather_texts(node);
+                if (texts && texts.length) {
+                    collected = collected.concat(texts);
+                }
+                if (collected.length >= 2) break;
+            }
+            if (collected.length) {
+                const headline = collected[0] || "N/A";
+                const description = collected.length > 1 ? collected.slice(1,3).join(' ') : "N/A";
+                return { headline, description };
+            }
+        }
+
+        // 2) If no image-based nearby text, search for prominent visible text nodes on page but avoid install text
+        const badWords = ['install', 'get', 'download', 'ad', 'ads', 'ad·', 'ad '];
+        let best = null;
+        let bestFont = 0;
+        for (let el of Array.from(document.querySelectorAll('body *'))) {
+            try {
+                if (el.childElementCount > 0) continue;
+                const txt = clean(el.innerText || el.textContent || "");
+                if (!txt || txt.length < 3 || txt.length > 200) continue;
+                const lower = txt.toLowerCase();
+                if (badWords.some(b => lower === b || lower.startsWith(b + ' ') || lower.includes(' ' + b + ' '))) continue;
+                if (txt.includes('{{') || txt.includes('}}')) continue;
+                if (!isVisible(el)) continue;
+                const style = window.getComputedStyle(el);
+                const font = parseFloat(style.fontSize || '0') || 0;
+                if (font > bestFont) {
+                    bestFont = font;
+                    best = txt;
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+        if (best) {
+            // Try to find a description near that best text
+            const node = Array.from(document.querySelectorAll('body *')).find(el => (el.innerText || "").trim() === best);
+            if (node) {
+                const descs = gather_texts(node.parentElement);
+                const description = descs && descs.length > 0 ? descs.slice(0,2).join(' ') : "N/A";
+                return { headline: best, description };
+            }
+            return { headline: best, description: "N/A" };
+        }
+
+        return { headline: "N/A", description: "N/A" };
+    }
+    """
+
+    start = time.time()
+    while time.time() - start < max_wait_seconds:
+        try:
+            # Check main page
+            result = page.evaluate(js)
+            if result and (result.get("headline") != "N/A" or result.get("description") != "N/A"):
+                # Final sanity: don't accept pure 'install' or extremely short headline
+                hl = result.get("headline") or "N/A"
+                desc = result.get("description") or "N/A"
+                if hl and hl.lower().strip() not in ("install", "get", "download"):
+                    return hl, desc
+        except Exception:
+            pass
+
+        # Check frames as well
+        for frame in page.frames:
+            try:
+                result = frame.evaluate(js)
+                if result and (result.get("headline") != "N/A" or result.get("description") != "N/A"):
+                    hl = result.get("headline") or "N/A"
+                    desc = result.get("description") or "N/A"
+                    if hl and hl.lower().strip() not in ("install", "get", "download"):
+                        return hl, desc
+            except Exception:
+                continue
+
+        page.wait_for_timeout(700)
+
+    return "N/A", "N/A"
 
 
 def scrape_single_url(url_row):
@@ -1541,19 +1574,6 @@ def scrape_single_url(url_row):
             visible_package = extract_package_name(visible_app_link)
 
             is_image_like = has_visible_image_creative(page)
-            
-            # If it's image-like but no headline/description found from text path,
-            # try image-specific extraction (non-invasive) and reuse text matching logic.
-            if not has_text and is_image_like:
-                img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
-                img_head = clean_text(img_head)
-                img_desc = clean_text(img_desc)
-                if is_valid_text_ad(img_head, img_desc):
-                    headline = img_head
-                    description = img_desc
-                    has_text = True
-                    print(f"🔎 Row {row_num}: extracted headline/description from image creative -> H: {headline} | D: {description}")
-
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
@@ -1601,6 +1621,23 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
+                # NEW: If image ad with no visible headline/description, try to extract text near images
+                if not has_text and is_image_like:
+                    print(f"🧭 Row {row_num}: attempting image-ad headline/description extraction")
+                    try:
+                        img_headline, img_description = extract_headline_description_for_image_ad(page, max_wait_seconds=8)
+                        img_headline = clean_text(img_headline)
+                        img_description = clean_text(img_description)
+                        if img_headline != "N/A" or img_description != "N/A":
+                            print(f"🔎 Row {row_num}: image-ad text found -> H: {img_headline} | D: {img_description}")
+                            headline = img_headline if img_headline and img_headline != "N/A" else headline
+                            description = img_description if img_description and img_description != "N/A" else description
+                            has_text = is_valid_text_ad(headline, description)
+                            # update sheet headline/desc early so we don't lose them on failure paths
+                            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
+                    except Exception:
+                        pass
+
                 if has_text:
                     print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
                     all_found_packages = extract_package_from_page(page)
@@ -1628,6 +1665,7 @@ def scrape_single_url(url_row):
                 process_time
             ]
 
+            # Ensure headline/description written. If image-ad found text above we updated early; otherwise write current values.
             safe_update_combined_row(row_num, data)
             safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
 
