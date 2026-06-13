@@ -1438,7 +1438,7 @@ def has_visible_image_creative(page):
             return isVisible(el);
         });
 
-        if (imageLike) return True;
+        if (imageLike) return true;
 
         return Array.from(document.querySelectorAll('*')).some(el => {
             if (!isVisible(el)) return false;
@@ -1462,7 +1462,6 @@ def has_visible_image_creative(page):
             continue
 
     return False
-
 
 def scrape_single_url(url_row):
     row_num, url = url_row
