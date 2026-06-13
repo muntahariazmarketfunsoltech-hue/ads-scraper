@@ -1230,6 +1230,125 @@ def wait_and_extract_text_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
+
+    def extract_image_ad_text(page):
+    """
+    Image ads:
+    Lower large text = headline
+    Text directly below = description
+    """
+
+    js = r"""
+    () => {
+
+        const clean = txt =>
+            (txt || "")
+                .replace(/\n/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+
+        const isVisible = (el) => {
+            if (!el) return false;
+
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+
+            return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                style.opacity !== "0"
+            );
+        };
+
+        const results = [];
+
+        document.querySelectorAll("*").forEach(el => {
+
+            if (!isVisible(el))
+                return;
+
+            if (el.children.length > 0)
+                return;
+
+            const text = clean(el.innerText || el.textContent);
+
+            if (!text)
+                return;
+
+            if (text.length < 5)
+                return;
+
+            if (
+                text.includes("Ads Transparency") ||
+                text.includes("See more ads") ||
+                text.includes("Report this ad")
+            )
+                return;
+
+            const rect = el.getBoundingClientRect();
+
+            results.push({
+                text,
+                y: rect.top,
+                size: parseFloat(
+                    window.getComputedStyle(el).fontSize || "0"
+                )
+            });
+        });
+
+        if (!results.length)
+            return {
+                headline: "N/A",
+                description: "N/A"
+            };
+
+        results.sort((a,b) => a.y - b.y);
+
+        let headline = "N/A";
+        let description = "N/A";
+
+        for (let i=0;i<results.length;i++) {
+
+            const txt = results[i].text;
+
+            if (
+                txt.length >= 15 &&
+                txt.length <= 120
+            ) {
+                headline = txt;
+
+                for (let j=i+1;j<results.length;j++) {
+
+                    if (
+                        results[j].text !== headline &&
+                        results[j].text.length >= 10 &&
+                        results[j].text.length <= 200
+                    ) {
+                        description = results[j].text;
+                        break;
+                    }
+                }
+
+                break;
+            }
+        }
+
+        return {
+            headline,
+            description
+        };
+    }
+    """
+
+    try:
+        return page.evaluate(js)
+    except:
+        return {
+            "headline": "N/A",
+            "description": "N/A"
+        }
 # =========================
 # MAIN COMBINED SCRAPER: VIDEO ADS + TEXT ADS
 # =========================
@@ -1473,11 +1592,18 @@ def scrape_single_url(url_row):
             else:
                 package_name = None
                 match_score = 0.0
+                if headline != "N/A" or description != "N/A":
+                    print(
+                        f"📦 Row {row_num}: visible install link not found, strict matching with headline + description"
+                    )
 
-                if has_text:
-                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
                     all_found_packages = extract_package_from_page(page)
-                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+
+                    package_name, match_score = get_best_matching_package(
+                        headline,
+                        description,
+                        all_found_packages
+                    )
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
