@@ -1272,7 +1272,7 @@ def has_visible_image_creative(page):
             return isVisible(el);
         });
 
-        if (imageLike) return true;
+        if (imageLike) return True;
 
         return Array.from(document.querySelectorAll('*')).some(el => {
             if (!isVisible(el)) return false;
@@ -1323,18 +1323,45 @@ def scrape_single_url(url_row):
         )
 
         page = context.new_page()
-        captured = {"video_id": "N/A"}
+        captured = {
+            "video_id": "N/A",
+            "network_packages": set()
+        }
 
-        # ORIGINAL VIDEO RESPONSE HANDLER - kept unchanged.
+        # ORIGINAL VIDEO RESPONSE HANDLER - kept unchanged, plus network package harvesting.
         def handle_response(response):
             try:
-                if not is_real_video_response(response):
-                    return
+                if is_real_video_response(response):
+                    video_id = extract_video_id_from_url(response.url)
 
-                video_id = extract_video_id_from_url(response.url)
+                    if video_id and captured["video_id"] == "N/A":
+                        captured["video_id"] = video_id
 
-                if video_id and captured["video_id"] == "N/A":
-                    captured["video_id"] = video_id
+                # --- NEW: capture play store / market package IDs from network responses ---
+                try:
+                    url_l = response.url.lower()
+                except Exception:
+                    url_l = ""
+
+                if "play.google.com/store/apps/details" in url_l:
+                    try:
+                        parsed = urlparse(response.url)
+                        q = parse_qs(parsed.query)
+                        pkg = q.get("id", [None])[0]
+                        if pkg and _is_valid_pkg(pkg):
+                            captured["network_packages"].add(pkg)
+                    except Exception:
+                        pass
+                elif "market://" in url_l:
+                    try:
+                        m = re.search(r"id=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){1,})", response.url)
+                        if m:
+                            pkg = m.group(1)
+                            if _is_valid_pkg(pkg):
+                                captured["network_packages"].add(pkg)
+                    except Exception:
+                        pass
+                # ------------------------------------------------------------------------
 
             except Exception:
                 pass
@@ -1463,6 +1490,42 @@ def scrape_single_url(url_row):
 
             print(f"📦 Row {row_num}: resolving package from visible install link first")
 
+            # ----------------- Debug & Fallback Package Resolution -----------------
+            # Collect packages from DOM and network-captured responses
+            all_found_packages = extract_package_from_page(page) or set()
+            network_pkgs = set(captured.get("network_packages", set()))
+            if network_pkgs:
+                print(f"DEBUG Row {row_num}: network packages found = {network_pkgs}")
+            all_found_packages |= network_pkgs
+
+            print(f"DEBUG Row {row_num}: headline={headline!r}")
+            print(f"DEBUG Row {row_num}: description={description!r}")
+            print(f"DEBUG Row {row_num}: all_found_packages={all_found_packages}")
+
+            # If no candidates found at all, dump a short HTML snippet for debugging (optional)
+            if not all_found_packages:
+                try:
+                    snippet = page.evaluate("() => document.documentElement.outerHTML.slice(0,2000)")
+                    print(f"DEBUG Row {row_num}: page HTML snippet: {snippet[:800]!r}")
+                except Exception:
+                    pass
+
+            # Debug per-package scoring function
+            def debug_score_packages(local_headline, local_description, package_list):
+                best_pkg = None
+                best_score = 0.0
+                for pkg in sorted(package_list):
+                    score = score_package_against_text(pkg, local_headline, local_description)
+                    print(f"DEBUG Row {row_num}: pkg={pkg} -> score={score}")
+                    if score > best_score:
+                        best_score = score
+                        best_pkg = pkg
+                print(f"DEBUG Row {row_num}: best raw match (no threshold) = {best_pkg} score={best_score}")
+                return best_pkg, best_score
+
+            raw_best_pkg, raw_best_score = debug_score_packages(headline, description, all_found_packages)
+
+            # Prefer visible explicit install link first
             if visible_package != "N/A":
                 package_name = visible_package
                 app_link = visible_app_link
@@ -1470,26 +1533,39 @@ def scrape_single_url(url_row):
                 status = "SUCCESS"
                 message = f"Non-video {ad_type} ad package extracted from visible install link"
                 print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
+            elif raw_best_pkg and raw_best_score >= MIN_PACKAGE_MATCH_SCORE:
+                package_name = raw_best_pkg
+                match_score = raw_best_score
+                app_link = f"https://play.google.com/store/apps/details?id={package_name}"
+                status = "SUCCESS"
+                message = f"Non-video {ad_type} ad package strictly matched with score {match_score}"
+                print(f"✅ Row {row_num}: strict matched package -> {package_name} | score={match_score}")
             else:
-                package_name = None
-                match_score = 0.0
-
-                if has_text:
-                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
-                    all_found_packages = extract_package_from_page(page)
-                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
-
-                if package_name:
+                # Fallback: prefer network-captured packages (high-confidence)
+                if network_pkgs:
+                    package_name = next(iter(network_pkgs))
+                    match_score = 1.0
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
-                    status = "SUCCESS"
-                    message = f"Non-video {ad_type} ad package strictly matched with score {match_score}"
-                    print(f"✅ Row {row_num}: strict matched package -> {package_name} | score={match_score}")
+                    status = "SUCCESS_FROM_NETWORK"
+                    message = "Used package from network resources (fallback)"
+                    print(f"⚠️ Row {row_num}: no strict match but using network package -> {package_name}")
                 else:
-                    package_name = "N/A"
-                    app_link = "N/A"
-                    status = "NON_VIDEO_PACKAGE_NOT_FOUND"
-                    message = f"Non-video {ad_type} ad found, but package score below 0.76. Best score={match_score}"
-                    print(f"⚠️ Row {row_num}: package score below 0.76, writing N/A | best score={match_score}")
+                    # Optional softer fallback: accept a weaker score if clearly better than nothing
+                    if raw_best_pkg and raw_best_score >= 0.68:
+                        package_name = raw_best_pkg
+                        match_score = raw_best_score
+                        app_link = f"https://play.google.com/store/apps/details?id={package_name}"
+                        status = "WEAK_MATCH"
+                        message = f"Weak non-video {ad_type} match accepted (score {match_score})"
+                        print(f"⚠️ Row {row_num}: weak package match accepted -> {package_name} | score={match_score}")
+                    else:
+                        package_name = "N/A"
+                        app_link = "N/A"
+                        status = "NON_VIDEO_PACKAGE_NOT_FOUND"
+                        match_score = raw_best_score or 0.0
+                        message = f"Non-video {ad_type} ad found, but package score below threshold. Best score={match_score}"
+                        print(f"⚠️ Row {row_num}: package not found | best score={match_score}")
+            # ---------------------------------------------------------------------
 
             data = [
                 advertiser,
