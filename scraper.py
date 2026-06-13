@@ -784,10 +784,8 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Clears cache by:
-    1. Only targeting CURRENTLY VISIBLE elements in viewport
-    2. Skipping elements outside viewport
-    3. Taking elements that are most recently rendered
+    CRITICAL FIX: Only extracts from the TOP/ACTIVE creative, not other ads on page.
+    Finds the creative container with an image, then extracts text FROM THAT CONTAINER ONLY.
     """
     js = r"""
     () => {
@@ -797,11 +795,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             if (!el) return false;
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-            
-            // STRICT: Must be in current viewport, not hidden
             return rect.width > 0 && rect.height > 0 &&
-                   rect.top >= -100 && rect.top <= window.innerHeight + 100 && // In or near viewport
-                   rect.left >= -100 && rect.left <= window.innerWidth + 100 &&
                    style.visibility !== 'hidden' &&
                    style.display !== 'none' &&
                    style.opacity !== '0';
@@ -810,79 +804,98 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // STRATEGY: Find visible elements that are in the current creative area (not logs/page chrome)
-        // Filter to only CURRENT viewport elements
+        // CRITICAL: Find the ACTIVE creative container (has image + is most visible)
+        // This prevents picking text from other ads on the page
         
-        const headlineSelectors = [
-            'div.landscape-app-title',
-            '[class*="app-title"]:not([style*="display: none"])',
-            '[class*="headline"]:not([style*="display: none"])',
-            'div[role="link"] span',
-            'div.HFTpmd-WsjYwc-hgDUwe',
-            'div.cS4Vcb-vnv8ic'
-        ];
+        // Step 1: Find ALL containers that have an image (likely creative containers)
+        const containers = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
+            // Must have an image inside
+            const img = el.querySelector('img, picture, canvas, svg');
+            if (!img) return false;
+            
+            // Must be reasonably sized (not tiny)
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 100 || rect.height < 100) return false;
+            
+            return isVisible(el);
+        });
 
-        for (let selector of headlineSelectors) {
-            const elements = document.querySelectorAll(selector);
-            if (elements.length === 0) continue;
-            
-            // Get elements sorted by Y position (top to bottom)
-            const visible = [];
-            for (let i = 0; i < elements.length; i++) {
-                const el = elements[i];
-                if (isVisible(el)) {
-                    const txt = cleanText(el.innerText || el.textContent);
-                    if (txt.length > 0 && txt.length <= 150 && !txt.includes('{{')) {
-                        visible.push({
-                            text: txt,
-                            y: el.getBoundingClientRect().top
-                        });
-                    }
-                }
-            }
-            
-            // Sort by Y position and take the FIRST one (top-most visible element)
-            if (visible.length > 0) {
-                visible.sort((a, b) => a.y - b.y);
-                headline = visible[0].text;
-                break;
+        if (containers.length === 0) {
+            return { headline, description };
+        }
+
+        // Step 2: Pick the TOPMOST container (the active one, first on page)
+        let topContainer = containers[0];
+        let topY = topContainer.getBoundingClientRect().top;
+
+        for (let container of containers) {
+            const y = container.getBoundingClientRect().top;
+            if (y < topY) {
+                topY = y;
+                topContainer = container;
             }
         }
 
-        // DESCRIPTION: Look for text AFTER headline, in lower position
+        // Step 3: Extract headline and description ONLY FROM THIS TOP CONTAINER
+        const headlineSelectors = [
+            'div.landscape-app-title',
+            '[class*="app-title"]',
+            '[class*="headline"]',
+            'span',
+            'div'
+        ];
+
+        for (let selector of headlineSelectors) {
+            const elements = topContainer.querySelectorAll(selector);
+            
+            for (let el of elements) {
+                if (!isVisible(el)) continue;
+                
+                // Skip if has children (only leaf text nodes)
+                if (el.children.length > 0) continue;
+                
+                const txt = cleanText(el.innerText || el.textContent || '');
+                if (txt.length > 2 && txt.length <= 150 && 
+                    !txt.includes('{{') && 
+                    !txt.toLowerCase().includes('install') &&
+                    !txt.toLowerCase().includes('download')) {
+                    headline = txt;
+                    break;
+                }
+            }
+            if (headline !== "N/A") break;
+        }
+
+        // Step 4: Extract description ONLY FROM TOP CONTAINER, MUST BE DIFFERENT FROM HEADLINE
         const descriptionSelectors = [
             'div.landscape-app-text',
-            '[class*="app-text"]:not([style*="display: none"])',
-            '[class*="long-description"]:not([style*="display: none"])',
-            'div.HFTpmd-WsjYwc-hgDUwe',
-            'div.cS4Vcb-vnv8ic'
+            '[class*="app-text"]',
+            '[class*="description"]',
+            'p',
+            'span',
+            'div'
         ];
 
         for (let selector of descriptionSelectors) {
-            const elements = document.querySelectorAll(selector);
-            if (elements.length === 0) continue;
+            const elements = topContainer.querySelectorAll(selector);
             
-            // Get elements sorted by Y position
-            const visible = [];
-            for (let i = 0; i < elements.length; i++) {
-                const el = elements[i];
-                if (isVisible(el)) {
-                    const txt = cleanText(el.innerText || el.textContent);
-                    if (txt.length > 0 && txt.length <= 200 && txt !== headline && !txt.includes('{{')) {
-                        visible.push({
-                            text: txt,
-                            y: el.getBoundingClientRect().top
-                        });
-                    }
+            for (let el of elements) {
+                if (!isVisible(el)) continue;
+                
+                // Skip if has children (only leaf text nodes)
+                if (el.children.length > 0) continue;
+                
+                const txt = cleanText(el.innerText || el.textContent || '');
+                if (txt.length > 2 && txt.length <= 200 && 
+                    txt !== headline &&
+                    !txt.includes('{{') && 
+                    !txt.toLowerCase().includes('install') &&
+                    !txt.toLowerCase().includes('download')) {
+                    description = txt;
+                    break;
                 }
             }
-            
-            // Sort by Y position and take the FIRST one
-            if (visible.length > 0) {
-                visible.sort((a, b) => a.y - b.y);
-                description = visible[0].text;
-                break;
-            }
+            if (description !== "N/A") break;
         }
 
         return { headline, description };
