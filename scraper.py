@@ -1542,8 +1542,9 @@ def scrape_single_url(url_row):
             visible_package = extract_package_name(visible_app_link)
 
             is_image_like = has_visible_image_creative(page)
-
-            # NEW: Only when image-like and text not found, try image extraction and then reuse existing package matching.
+            
+            # --- NEW: if it's image-like but we didn't get headline/description from text path,
+            # try a specialized image-text extraction routine and treat it like text if valid.
             if not has_text and is_image_like:
                 img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
                 img_head = clean_text(img_head)
@@ -1624,7 +1625,7 @@ def scrape_single_url(url_row):
                 url,
                 app_link,
                 process_time,
-                ad_type,      # Column F: text/image for non-video ads (unchanged behavior; 'image' lowercase)
+                ad_type,      # Column F: text/image for non-video ads
                 process_time
             ]
 
