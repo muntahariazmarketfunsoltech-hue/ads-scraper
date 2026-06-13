@@ -1314,7 +1314,8 @@ def scrape_single_url(url_row):
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-web-security",
-                "--disable-http-cache",  # Disable browser cache
+                "--disable-http-cache",  # Disable HTTP cache
+                "--disk-cache-size=0",  # No disk cache
             ]
         )
 
@@ -1353,14 +1354,14 @@ def scrape_single_url(url_row):
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}region=anywhere"
 
-            print(f"🔍 Row {row_num}: opening transparency URL (NO CACHE)")
+            print(f"🔍 Row {row_num}: opening transparency URL (CACHE DISABLED)")
 
             safe_add_log(
                 row_number=row_num,
                 status="STARTED",
                 log_type="COMBINED",
                 url=url,
-                message="Started combined video/text/image ad extraction (fresh, no cache)"
+                message="Started combined video/text/image ad extraction (cache disabled, fresh data)"
             )
 
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -1470,7 +1471,7 @@ def scrape_single_url(url_row):
                 print(f"🖼 Row {row_num}: IMAGE ad detected")
 
             # Try to extract package from page (fresh, no cache)
-            print(f"📦 Row {row_num}: extracting packages from page (fresh extraction)...")
+            print(f"📦 Row {row_num}: extracting packages from page (fresh extraction, cache disabled)...")
             all_found_packages = extract_package_from_page(page)
 
             # Package resolution logic (for TEXT ADS ONLY with 0.76 threshold)
@@ -1594,7 +1595,7 @@ def run_parallel_combined_scraper(max_workers=2):
     print(f"🚀 Starting combined VIDEO + TEXT + IMAGE scraper for {len(url_rows)} rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
     print(f"📊 TEXT ADS use strict 0.76 threshold | IMAGE ADS use visible install link only")
-    print(f"🚫 CACHING DISABLED - Fresh extraction on every run")
+    print(f"🚫 CACHE DISABLED - Fresh extraction on every run, no cached data")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -1620,7 +1621,7 @@ def run_parallel_combined_scraper(max_workers=2):
                 except Exception:
                     pass
 
-    print("✅ Finished combined video + text + image scraping (no cache)")
+    print("✅ Finished combined video + text + image scraping (cache disabled, fresh data used)")
 
 
 if __name__ == "__main__":
