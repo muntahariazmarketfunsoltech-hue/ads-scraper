@@ -1707,6 +1707,7 @@ def scrape_single_url(url_row):
             # NEW: For image-like creatives, first use exactly the same text-ad extraction
             # method used for text creatives (iframe-first selectors). Fallback to image
             # heuristic only if that fails.
+            image_extractor_used = False  # flag: set only when the image-specific extractor provided the accepted text
             if not has_text and is_image_like:
                 # 1) try the text-ad extractor (same method used for text ads)
                 img_text_data = wait_and_extract_text_ad_details(page, max_wait_seconds=15)
@@ -1741,6 +1742,7 @@ def scrape_single_url(url_row):
                         headline = img_head2
                         description = img_desc2
                         has_text = True
+                        image_extractor_used = True  # mark that we used image extractor fallback
                         print(f"🖼 Row {row_num}: image ad -> extracted via image heuristic fallback: {headline} | {description}")
                     else:
                         print(f"🖼 Row {row_num}: image ad -> no headline/description found by text-ad method or image fallback")
@@ -1789,8 +1791,28 @@ def scrape_single_url(url_row):
                 process_time
             ]
 
+            # If this row is an image ad and the image-specific extractor (fallback) was used,
+            # swap headline/description before saving. This addresses cases where the image
+            # extractor returns the top text and the below text in reversed order for sheet columns.
+            save_headline = headline if has_text else "N/A"
+            save_description = description if has_text else "N/A"
+
+            if ad_type == "image" and image_extractor_used and save_headline != "N/A":
+                # Only swap when the image-specific extractor was the source of the text.
+                save_headline, save_description = save_description, save_headline
+                try:
+                    safe_add_log(
+                        row_number=row_num,
+                        status="IMAGE_SWAP_APPLIED",
+                        log_type="IMAGE_AD",
+                        url=url,
+                        message=f"Swapped headline/description for image ad due to image-extractor ordering (headline_now='{save_headline[:120]}')"
+                    )
+                except Exception:
+                    pass
+
             safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
+            safe_update_headline_desc(row_num, save_headline, save_description)
 
             safe_add_log(
                 row_number=row_num,
