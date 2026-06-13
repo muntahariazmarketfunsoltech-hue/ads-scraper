@@ -97,7 +97,52 @@ def clean_text(value):
         return "N/A"
     return re.sub(r"\s+", " ", str(value)).strip() or "N/A"
 
+def extract_packages_from_ranked_frames(page, max_frames=5):
+    """
+    Run package extraction on the most likely non-video targets (iframes + page).
+    Returns a set of candidate package names found (using existing extract_packages_from_text).
+    """
+    all_found = set()
 
+    try:
+        ranked = get_ranked_non_video_targets(page)
+    except Exception:
+        ranked = []
+
+    # include main page as last fallback
+    targets = [t for _, t, _, _ in ranked[:max_frames]]
+    if page not in targets:
+        targets.append(page)
+
+    for target in targets:
+        try:
+            # grab outerHTML, hrefs, and visible text from that target
+            html = ""
+            try:
+                html = target.evaluate("() => document.documentElement ? document.documentElement.outerHTML : ''")
+            except Exception:
+                pass
+            hrefs = ""
+            try:
+                hrefs_list = target.evaluate("""() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean)""")
+                if hrefs_list:
+                    hrefs = "\n".join(hrefs_list)
+            except Exception:
+                pass
+            visible_text = ""
+            try:
+                visible_text = target.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                pass
+
+            combined = "\n".join([html or "", hrefs or "", visible_text or ""])
+            if combined and len(combined) > 10:
+                found = extract_packages_from_text(combined)
+                all_found.update(found)
+        except Exception:
+            continue
+
+    return all_found
 def extract_package_name(app_link):
     """
     Extracts package name from app store link.
@@ -716,10 +761,10 @@ def wait_and_extract_headline_description(page, max_wait_seconds=15):
 
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
-    Attempt to extract headline/description for image ads by:
-    - Checking image alt/title attributes
-    - Finding nearby visible text in the DOM (parent/closest ancestor, previous/next siblings)
-    - Running in iframes as well
+    Improved image-ad extractor:
+    - For each visible image-like element, collects nearby text candidates with font-size
+    - Chooses the largest-font candidate as headline, next-best as description
+    - Runs in the main page and inside frames (prioritizes ranked frames first)
     Returns (headline, description) or ("N/A", "N/A")
     """
     js = r"""
@@ -727,126 +772,101 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         const clean = (s) => (s || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
         const isVisible = (el) => {
             if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 && rect.height > 0 &&
-                   rect.bottom > 0 && rect.right > 0 &&
-                   rect.top < window.innerHeight && rect.left < window.innerWidth &&
-                   style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+            try {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 &&
+                       rect.bottom > 0 && rect.right > 0 &&
+                       rect.top < window.innerHeight && rect.left < window.innerWidth &&
+                       style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+            } catch(e) { return false; }
         };
 
-        const getNearbyText = (el) => {
-            // 1) alt/title on the image
-            const alt = clean(el.getAttribute('alt') || el.getAttribute('title') || '');
-            if (alt && alt.length >= 3 && alt.length <= 120) return { headline: alt, description: "N/A" };
+        const collectTextCandidates = (root, imgEl) => {
+            const candidates = [];
 
-            // 2) immediate siblings (previous/next)
-            const tryNode = (node) => {
-                if (!node) return null;
-                const txt = clean(node.innerText || node.textContent || '');
-                if (txt && txt.length >= 3 && txt.length <= 300 && !txt.includes('{{')) return txt;
-                return null;
+            // helper to push candidate with font size
+            const pushIfGood = (el) => {
+                if (!el) return;
+                try {
+                    if (!isVisible(el)) return;
+                    const txt = clean(el.innerText || el.textContent || '');
+                    if (!txt || txt.length < 2 || txt.length > 500 || txt.includes('{{')) return;
+                    const style = window.getComputedStyle(el);
+                    const font = parseFloat(style.fontSize || '0') || 0;
+                    // prefer shorter headline-like strings too
+                    candidates.push({ text: txt, font: font, length: txt.length });
+                } catch(e) { }
             };
 
-            let prev = el.previousElementSibling;
-            while (prev) {
-                if (isVisible(prev)) {
-                    const t = tryNode(prev);
-                    if (t) return { headline: t, description: "N/A" };
-                }
-                prev = prev.previousElementSibling;
-            }
+            // alt/title first
+            try {
+                const alt = clean(imgEl.getAttribute('alt') || imgEl.getAttribute('title') || '');
+                if (alt) candidates.push({ text: alt, font: 12, length: alt.length });
+            } catch(e){}
 
-            let next = el.nextElementSibling;
-            while (next) {
-                if (isVisible(next)) {
-                    const t = tryNode(next);
-                    if (t) return { headline: t, description: "N/A" };
-                }
-                next = next.nextElementSibling;
-            }
+            // immediate siblings
+            let s = imgEl.previousElementSibling;
+            for (let i=0;i<6 && s; i++, s = s.previousElementSibling) { pushIfGood(s); }
+            s = imgEl.nextElementSibling;
+            for (let i=0;i<6 && s; i++, s = s.nextElementSibling) { pushIfGood(s); }
 
-            // 3) look upwards for the closest ancestor that has text nodes or <figcaption>, <p>, <span>
-            let ancestor = el.parentElement;
-            for (let depth = 0; ancestor && depth < 5; depth++, ancestor = ancestor.parentElement) {
+            // small search in parent, then ancestor up to depth 5
+            let ancestor = imgEl.parentElement;
+            for (let depth=0; depth<5 && ancestor; depth++, ancestor = ancestor.parentElement) {
                 try {
-                    if (!isVisible(ancestor)) continue;
-                    const figcap = ancestor.querySelector('figcaption, .caption, .ad-caption, .creative-caption');
-                    if (figcap) {
-                        const t = clean(figcap.innerText || figcap.textContent || '');
-                        if (t && t.length >= 3 && t.length <= 300) return { headline: t, description: "N/A" };
-                    }
-                    // search for a short bold/large text inside ancestor
-                    const candidates = Array.from(ancestor.querySelectorAll('h1,h2,h3,h4,strong,b,span'));
-                    for (let c of candidates) {
-                        if (!isVisible(c)) continue;
-                        const t = clean(c.innerText || c.textContent || '');
-                        if (t && t.length >= 3 && t.length <= 200 && !t.includes('{{')) return { headline: t, description: "N/A" };
-                    }
-                    // fallback: any leaf text
+                    // prefer headings and figcaptions
+                    const h = ancestor.querySelector('figcaption, h1,h2,h3,h4, .headline, .title, .caption, .ad-caption, .creative-caption, .ad-title');
+                    if (h) pushIfGood(h);
+                    // also gather other visible leaf texts inside the ancestor
                     const leafs = Array.from(ancestor.querySelectorAll('*')).filter(e => e.childElementCount === 0);
-                    for (let lf of leafs) {
-                        if (!isVisible(lf)) continue;
-                        const t = clean(lf.innerText || lf.textContent || '');
-                        if (t && t.length >= 3 && t.length <= 220 && !t.includes('{{')) return { headline: t, description: "N/A" };
-                    }
-                } catch (e) {
-                    continue;
-                }
+                    for (let lf of leafs.slice(0,20)) pushIfGood(lf);
+                } catch(e) { continue; }
             }
 
-            return null;
+            // unique and reasonable sorting
+            const uniq = {};
+            const out = [];
+            for (let c of candidates) {
+                const key = c.text.slice(0,120);
+                if (!uniq[key]) { uniq[key] = true; out.push(c); }
+            }
+            out.sort((a,b) => (b.font || 0) - (a.font || 0) || a.length - b.length);
+            return out;
         };
 
-        // find visible image-like elements
+        // find visible image elements
         const imgs = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
             try {
                 const rect = el.getBoundingClientRect();
                 if (!rect) return false;
                 if (rect.width < 80 || rect.height < 50) return false;
                 return isVisible(el);
-            } catch(e) {
-                return false;
-            }
+            } catch(e) { return false; }
         });
 
-        // prefer larger images first
-        imgs.sort((a, b) => {
+        // prefer larger images
+        imgs.sort((a,b) => {
             try {
                 const ra = a.getBoundingClientRect();
                 const rb = b.getBoundingClientRect();
-                return (rb.width * rb.height) - (ra.width * ra.height);
+                return (rb.width*rb.height) - (ra.width*ra.height);
             } catch(e) { return 0; }
         });
 
         for (let img of imgs) {
-            const altHeadline = clean(img.getAttribute('alt') || img.getAttribute('title') || '');
-            if (altHeadline && altHeadline.length >= 3 && altHeadline.length <= 200 && !altHeadline.includes('{{')) {
-                // try to also find a longer nearby description
-                const maybeDesc = (function() {
-                    let ns = img.nextElementSibling;
-                    while (ns) {
-                        const t = clean(ns.innerText || ns.textContent || '');
-                        if (t && t.length >= 10 && t.length <= 400 && !t.includes('{{')) return t;
-                        ns = ns.nextElementSibling;
+            try {
+                const cands = collectTextCandidates(document, img);
+                if (cands && cands.length) {
+                    const headline = clean(cands[0].text || '') || "N/A";
+                    const description = (cands.length > 1 ? clean(cands[1].text) : "N/A") || "N/A";
+                    // ensure headline isn't just "Ad" or "Sponsored"
+                    const lower = headline.toLowerCase();
+                    if (headline && headline.length > 1 && !lower.includes('ad') && !lower.includes('sponsored')) {
+                        return { headline, description };
                     }
-                    // check parent for a description block
-                    let p = img.parentElement;
-                    for (let i=0;i<4 && p; i++, p = p.parentElement) {
-                        const descEl = p.querySelector('p, .description, .long-description, .ad-description');
-                        if (descEl && isVisible(descEl)) {
-                            const txt = clean(descEl.innerText || descEl.textContent || '');
-                            if (txt && txt.length >= 10 && txt.length <= 400 && !txt.includes('{{')) return txt;
-                        }
-                    }
-                    return null;
-                })();
-
-                return { headline: altHeadline, description: maybeDesc || "N/A" };
-            }
-
-            const near = getNearbyText(img);
-            if (near) return near;
+                }
+            } catch(e) { continue; }
         }
 
         return null;
@@ -854,28 +874,50 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
 
     start = time.time()
-    while time.time() - start < max_wait_seconds:
-        # Check main page
+    end = start + max_wait_seconds
+
+    # Try top-ranked frames first (if available)
+    try:
+        ranked = get_ranked_non_video_targets(page)
+    except Exception:
+        ranked = []
+
+    # Evaluate in the most likely frames first
+    for score, target, kind, info in ranked:
+        if time.time() > end:
+            break
         try:
-            result = page.evaluate(js)
-            if result and (result.get("headline") != "N/A" or result.get("description") != "N/A"):
-                return result.get("headline", "N/A"), result.get("description", "N/A")
+            res = None
+            if kind == "iframe":
+                res = target.evaluate(js)
+            else:
+                res = page.evaluate(js)
+            if res and (res.get("headline") or res.get("description")):
+                return res.get("headline", "N/A"), res.get("description", "N/A")
+        except Exception:
+            continue
+
+    # fallback to whole-page run and frames full scan
+    while time.time() < end:
+        try:
+            res = page.evaluate(js)
+            if res and (res.get("headline") or res.get("description")):
+                return res.get("headline", "N/A"), res.get("description", "N/A")
         except Exception:
             pass
 
-        # Check frames
         for frame in page.frames:
+            if time.time() > end:
+                break
             try:
                 res = frame.evaluate(js)
-                if res and (res.get("headline") != "N/A" or res.get("description") != "N/A"):
+                if res and (res.get("headline") or res.get("description")):
                     return res.get("headline", "N/A"), res.get("description", "N/A")
             except Exception:
                 continue
 
-        page.wait_for_timeout(1000)
-
+        page.wait_for_timeout(400)
     return "N/A", "N/A"
-
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
 # =========================
@@ -1594,66 +1636,50 @@ def scrape_single_url(url_row):
             is_image_like = has_visible_image_creative(page)
             ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
 
-            # NEW: If image-like but no text found by text-ad extractor, try the image-ad extractor
-            if not has_text and is_image_like:
-                img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
-                img_head = clean_text(img_head)
-                img_desc = clean_text(img_desc)
-                if is_valid_text_ad(img_head, img_desc):
-                    headline = img_head
-                    description = img_desc
-                    has_text = True
-                    print(f"🖼 Row {row_num}: extracted text from image ad -> {headline} | {description}")
+           # NEW: If image-like but no text found by text-ad extractor, try the image-ad extractor
+if not has_text and is_image_like:
+    # try targeted frames first (best hit-rate)
+    img_head, img_desc = wait_and_extract_image_ad_details(page, max_wait_seconds=10)
+    img_head = clean_text(img_head)
+    img_desc = clean_text(img_desc)
 
-            if not has_text and visible_package == "N/A" and not is_image_like:
-                data = [
-                    advertiser,
-                    "N/A",
-                    url,
-                    "N/A",
-                    process_time,
-                    "N/A",
-                    process_time
-                ]
+    # DEBUG log the candidates so you can inspect Row-level output
+    try:
+        if img_head != "N/A" or img_desc != "N/A":
+            safe_add_log(
+                row_number=row_num,
+                status="IMAGE_TEXT_CANDIDATE",
+                log_type="IMAGE_AD",
+                url=url,
+                message=f"img_head='{img_head}' img_desc='{img_desc}'"
+            )
+    except Exception:
+        pass
 
-                safe_update_combined_row(row_num, data)
-                safe_update_headline_desc(row_num, "N/A", "N/A")
+    if is_valid_text_ad(img_head, img_desc):
+        headline = img_head
+        description = img_desc
+        has_text = True
+        print(f"🖼 Row {row_num}: extracted text from image ad -> {headline} | {description}")
 
-                safe_add_log(
-                    row_number=row_num,
-                    status="NO_VIDEO_NO_TEXT_IMAGE",
-                    log_type="COMBINED",
-                    url=url,
-                    video_id="N/A",
-                    app_link="N/A",
-                    message="No video ID and no valid text/image creative found"
-                )
+# Resolve package: first from visible install link (same as before)
+if visible_package != "N/A":
+    package_name = visible_package
+    app_link = visible_app_link
+    match_score = 1.0
+    status = "SUCCESS"
+    message = f"Non-video {ad_type} ad package extracted from visible install link"
+else:
+    # If visible install not found, run package extraction targeted to ranked frames
+    package_name = None
+    match_score = 0.0
+    all_found_packages = extract_packages_from_ranked_frames(page)
+    if not all_found_packages:
+        # fallback to previous page-wide extraction
+        all_found_packages = extract_package_from_page(page)
 
-                print(f"⏭ Row {row_num}: no video and no valid text/image ad found")
-                return
-
-            if has_text:
-                print(f"🔎 Row {row_num}: text/image headline -> {headline}")
-            else:
-                print(f"🖼 Row {row_num}: likely image ad, headline/description not found")
-
-            print(f"📦 Row {row_num}: resolving package from visible install link first")
-
-            if visible_package != "N/A":
-                package_name = visible_package
-                app_link = visible_app_link
-                match_score = 1.0
-                status = "SUCCESS"
-                message = f"Non-video {ad_type} ad package extracted from visible install link"
-                print(f"✅ Row {row_num}: package from visible install link -> {package_name}")
-            else:
-                package_name = None
-                match_score = 0.0
-
-                if has_text:
-                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
-                    all_found_packages = extract_package_from_page(page)
-                    package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
+    if has_text and all_found_packages:
+        package_name, match_score = get_best_matching_package(headline, description, all_found_packages)
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
