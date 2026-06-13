@@ -780,10 +780,14 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
+
+
+
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Extracts headline and description for IMAGE ADS.
-    Simpler approach: find all visible text, sort by position, take first two.
+    Headline = LARGER text element
+    Description = SMALLER text element below it
     """
     js = r"""
     () => {
@@ -798,7 +802,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             return true;
         };
 
-        // Get ALL visible text content on page
+        // Get ALL visible text content with font size info
         let textElements = [];
         
         document.querySelectorAll('*').forEach(el => {
@@ -814,43 +818,75 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             // Skip special markers
             if (txt.includes('{{') || txt.includes('}}')) return;
             
+            const style = window.getComputedStyle(el);
+            const fontSize = parseFloat(style.fontSize) || 0;
+            const rect = el.getBoundingClientRect();
+            
             textElements.push({
                 text: txt,
-                y: el.getBoundingClientRect().top,
-                x: el.getBoundingClientRect().left
+                fontSize: fontSize,
+                y: rect.top,
+                x: rect.left,
+                el: el
             });
         });
 
-        // Sort by Y position (top to bottom), then X position
+        // Sort by Y position first (top to bottom)
         textElements.sort((a, b) => {
             if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
             return a.x - b.x;
         });
 
-        // Find first 2 valid text elements
         let headline = "N/A";
         let description = "N/A";
-        let found = 0;
+
+        // Find BIGGER text as headline
+        let maxFontSize = 0;
+        let headlineObj = null;
 
         for (let elem of textElements) {
             const txt = elem.text;
-            
-            // Skip single words or very short text
-            if (txt.split(' ').length < 2 && txt.length < 15) continue;
             
             // Skip obvious non-ad text
             if (txt.toLowerCase().includes('sign in')) continue;
             if (txt.toLowerCase().includes('log in')) continue;
             if (txt.toLowerCase().includes('home')) continue;
             if (txt.toLowerCase().includes('help')) continue;
+            if (txt.toLowerCase().includes('agent_')) continue;
+            if (txt.toLowerCase().includes('install')) continue;
+            if (txt.toLowerCase().includes('download')) continue;
+            if (txt.toLowerCase().includes('get')) continue;
             
-            if (found === 0 && txt.length <= 120) {
+            // Look for the largest font size text (headline)
+            if (elem.fontSize > maxFontSize && txt.length <= 120) {
+                maxFontSize = elem.fontSize;
+                headlineObj = elem;
                 headline = txt;
-                found++;
-            } else if (found === 1 && txt !== headline && txt.length <= 200) {
-                description = txt;
-                found++;
-                break;
+            }
+        }
+
+        // Find SMALLER text below headline as description
+        if (headlineObj !== null) {
+            for (let elem of textElements) {
+                const txt = elem.text;
+                
+                // Must be below headline and smaller font
+                if (elem.y <= headlineObj.y) continue;
+                if (elem.fontSize >= headlineObj.fontSize) continue;
+                if (txt === headline) continue;
+                
+                // Skip non-ad text
+                if (txt.toLowerCase().includes('sign in')) continue;
+                if (txt.toLowerCase().includes('log in')) continue;
+                if (txt.toLowerCase().includes('install')) continue;
+                if (txt.toLowerCase().includes('download')) continue;
+                if (txt.toLowerCase().includes('agent_')) continue;
+                
+                // Valid description (smaller font, below headline)
+                if (txt.length >= 8 && txt.length <= 200) {
+                    description = txt;
+                    break;
+                }
             }
         }
 
