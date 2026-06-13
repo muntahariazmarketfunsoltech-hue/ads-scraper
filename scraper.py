@@ -780,13 +780,12 @@ def wait_and_extract_text_ad_details_relaxed(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
-
-
 def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
     """
     Enhanced extraction for IMAGE ADS.
-    Targets text elements that appear below the visible image.
-    Extracts headline (first text) and description (second text) in sequence.
+    Targets text elements ONLY within the ad creative container (inside iframe/creative wrapper).
+    Avoids logs, buttons, and page chrome.
+    Extracts headline and description in sequence.
     """
     js = r"""
     () => {
@@ -805,33 +804,52 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         let headline = "N/A";
         let description = "N/A";
 
-        // Step 1: Find the visible image/picture element
-        const images = Array.from(document.querySelectorAll('img, picture, canvas, svg')).filter(el => {
-            const src = String(el.getAttribute('src') || '').toLowerCase();
-            const alt = String(el.getAttribute('alt') || '').toLowerCase();
-            if (src.includes('googlelogo') || alt.includes('google')) return false;
-            return isVisible(el);
-        });
+        // STRICT: Find the ad creative container (usually has specific dimensions/structure)
+        // Look for a container with image + text together
+        const creativeContainers = Array.from(document.querySelectorAll('[role="article"], [role="link"], .ad-creative, .creative, [data-creative]')).filter(el => isVisible(el));
+        
+        if (creativeContainers.length === 0) {
+            // Fallback: Look for main content area (not sidebars/logs)
+            const mainContent = document.querySelector('main, [role="main"], .main-content') || document.body;
+            creativeContainers.push(mainContent);
+        }
 
-        if (images.length > 0) {
+        for (let container of creativeContainers) {
+            // Step 1: Find visible image WITHIN this container
+            const images = Array.from(container.querySelectorAll('img, picture, canvas, svg')).filter(el => {
+                const src = String(el.getAttribute('src') || '').toLowerCase();
+                const alt = String(el.getAttribute('alt') || '').toLowerCase();
+                if (src.includes('googlelogo') || alt.includes('google') || src.includes('logo')) return false;
+                if (src.length < 10) return false; // Skip tiny icons/logos
+                return isVisible(el);
+            });
+
+            if (images.length === 0) continue;
+
             const firstImage = images[0];
             const imageRect = firstImage.getBoundingClientRect();
             const imageBottom = imageRect.bottom;
+            const containerRect = container.getBoundingClientRect();
 
-            // Step 2: Find all leaf text nodes (no children) that are visible
-            let allText = Array.from(document.querySelectorAll('*')).filter(el => {
+            // Step 2: Find all leaf text nodes WITHIN this container
+            let allText = Array.from(container.querySelectorAll('*')).filter(el => {
                 if (el.childElementCount > 0) return false;
                 const txt = cleanText(el.innerText || el.textContent || '');
                 if (txt.length < 2 || txt.length > 220) return false;
                 if (txt.includes('{{') || txt.includes('}}')) return false;
+                if (txt.toLowerCase().includes('agent_')) return false; // Skip log entries
+                if (txt.toLowerCase().includes('claimed')) return false; // Skip status text
+                if (txt.toLowerCase().includes('done')) return false; // Skip status text
                 if (!isVisible(el)) return false;
                 return true;
             });
 
-            // Step 3: Filter text elements that appear BELOW the image
+            // Step 3: Filter text that appears BELOW the image (within same container area)
             let textBelowImage = allText.filter(el => {
                 const rect = el.getBoundingClientRect();
-                return rect.top >= imageBottom - 10; // Allow small overlap
+                // Text must be below image and within the creative container bounds
+                return rect.top >= imageBottom - 10 && 
+                       rect.bottom <= containerRect.bottom + 50;
             });
 
             // Step 4: Sort by vertical position (top to bottom)
@@ -842,28 +860,41 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
             });
 
             // Step 5: Extract headline (first valid text below image)
-            for (let el of textBelowImage) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 3 && txt.length <= 100 && 
-                    !txt.toLowerCase().includes('download') && 
-                    !txt.toLowerCase().includes('install') &&
-                    !txt.toLowerCase().includes('get')) {
-                    headline = txt;
-                    break;
+            if (headline === "N/A") {
+                for (let el of textBelowImage) {
+                    let txt = cleanText(el.innerText || el.textContent || '');
+                    if (txt.length >= 3 && txt.length <= 100 && 
+                        !txt.toLowerCase().includes('download') && 
+                        !txt.toLowerCase().includes('install') &&
+                        !txt.toLowerCase().includes('get') &&
+                        !txt.toLowerCase().includes('agent_') &&
+                        !txt.toLowerCase().includes('claimed')) {
+                        headline = txt;
+                        break;
+                    }
                 }
             }
 
             // Step 6: Extract description (second valid text below image, different from headline)
-            for (let el of textBelowImage) {
-                let txt = cleanText(el.innerText || el.textContent || '');
-                if (txt.length >= 8 && txt.length <= 150 && 
-                    txt !== headline &&
-                    !txt.toLowerCase().includes('download') && 
-                    !txt.toLowerCase().includes('install') &&
-                    !txt.toLowerCase().includes('get')) {
-                    description = txt;
-                    break;
+            if (description === "N/A") {
+                for (let el of textBelowImage) {
+                    let txt = cleanText(el.innerText || el.textContent || '');
+                    if (txt.length >= 8 && txt.length <= 150 && 
+                        txt !== headline &&
+                        !txt.toLowerCase().includes('download') && 
+                        !txt.toLowerCase().includes('install') &&
+                        !txt.toLowerCase().includes('get') &&
+                        !txt.toLowerCase().includes('agent_') &&
+                        !txt.toLowerCase().includes('claimed')) {
+                        description = txt;
+                        break;
+                    }
                 }
+            }
+
+            // If we found both, stop looking in other containers
+            if (headline !== "N/A" && description !== "N/A") {
+                break;
             }
         }
 
@@ -897,6 +928,7 @@ def wait_and_extract_image_ad_details(page, max_wait_seconds=15):
         page.wait_for_timeout(1000)
 
     return {"headline": "N/A", "description": "N/A"}
+
 
 # =========================
 # STRICT TEXT-AD PACKAGE MATCHER
