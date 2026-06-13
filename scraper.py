@@ -1563,17 +1563,16 @@ def scrape_single_url(url_row):
                 package_name = None
                 match_score = 0.0
 
-               if headline != "N/A" or description != "N/A":
+                if headline != "N/A" or description != "N/A":
+                    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
 
-    print(f"📦 Row {row_num}: visible install link not found, strict matching with headline + description")
+                    all_found_packages = extract_package_from_page(page)
 
-    all_found_packages = extract_package_from_page(page)
-
-    package_name, match_score = get_best_matching_package(
-                                  headline,
-                                  description,
-                                  all_found_packages
-                                 )
+                    package_name, match_score = get_best_matching_package(
+                        headline,
+                        description,
+                        all_found_packages
+                    )
 
                 if package_name:
                     app_link = f"https://play.google.com/store/apps/details?id={package_name}"
