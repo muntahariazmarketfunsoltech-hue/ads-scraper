@@ -9,7 +9,7 @@ from datetime import datetime
 import difflib
 import re
 
-def get_best_matching_package_for_text_ad(headline, description, package_list, min_score=0.76):
+def get_best_matching_package_for_text_ad(headline, description, package_list, min_score=0.70):
     """Matches package names with headline + description using character-level comparison."""
     import difflib
     def clean_text_for_comparison(text):
