@@ -90,5 +90,5 @@ jobs:
 
       - name: Check remaining rows
         run: python check_remaining.py
-      - name: Wait 20 minutes before next run
-        run: sleep 1200  # 1200 seconds = 20 minutes
+      - name: Wait 10 minutes before next run
+        run: sleep 600  # 600 seconds = 10 minutes
