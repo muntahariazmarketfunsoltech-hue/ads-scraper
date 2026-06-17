@@ -20,7 +20,7 @@ CLAIM_TTL_MINUTES = 5  # adjust to 370 for production
 
 LOG_BATCH_SIZE = 5  # batch logs to reduce API calls
 LOG_CACHE = []
-
+WRITE_LOGS = False 
 # --------------------------
 # Sheet auth
 # --------------------------
