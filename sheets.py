@@ -88,22 +88,13 @@ def add_log(row_number="", status="", log_type="", url="", video_id="", app_link
 def ensure_agent_headers():
     sheet = get_sheet()
     headers = sheet.row_values(1)
-    required = {
-        9: "Agent",
-        10: "Claim Time",
-        11: "Claim Token",
-        12: "Claim Status",
-        13: "Headline",
-        14: "Description"
-    }
-
+    required = {9: "Agent", 10: "Claim Time", 11: "Claim Token", 12: "Claim Status", 13: "Headline", 14: "Description"}
     updates = []
     for col, name in required.items():
         current = headers[col - 1] if len(headers) >= col else ""
         if current != name:
             col_letter = chr(64 + col) if col <= 26 else chr(64 + (col // 26)) + chr(64 + (col % 26))
             updates.append({"range": f"{col_letter}1", "values": [[name]]})
-
     if updates:
         sheet.batch_update(updates)
 
@@ -173,7 +164,6 @@ def get_agent_rows_snapshot():
             "processed": is_processed_video_value(video_id),
             "claim_expired": is_claim_expired(claim_time)
         })
-
     return rows
 
 
@@ -199,18 +189,14 @@ def get_next_agent_task(direction, agent_name, run_id):
 
     if len(unprocessed) == 1 and direction == "bottom":
         try:
-            add_log(
-                row_number="",
-                status="COLLISION_STOP",
-                log_type=agent_name,
-                message="Only one unprocessed row left. Bottom agent stopped to avoid collision."
-            )
+            add_log(row_number="", status="COLLISION_STOP", log_type=agent_name,
+                    message="Only one unprocessed row left. Bottom agent stopped to avoid collision.")
             flush_logs()
         except Exception:
             pass
         return "COLLISION_STOP"
 
-    candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=(direction == "bottom"))
+    candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=(direction=="bottom"))
 
     for candidate in candidates:
         row_num = candidate["row_num"]
@@ -266,32 +252,14 @@ def update_headline_and_description(row_index, headline, description):
     except gspread.exceptions.APIError as e:
         print(f"⚠ Failed to update headline/desc for row {row_index}: {e}")
 
-
-def update_ad_type_only(row_index, ad_type):
-    """
-    Writes only ad type to column F.
-    Use this for image ads so the scraper does NOT overwrite the full row A-G.
-    Example: update_ad_type_only(row_num, "image")
-    """
-    sheet = get_sheet()
-    cell_range = f"F{row_index}"
-    try:
-        sheet.update(cell_range, [[ad_type]])
-    except gspread.exceptions.APIError as e:
-        print(f"⚠ Failed to update ad type only for row {row_index}: {e}")
-
-
 # Add the get_urls_with_retry helper function which was originally called in SCRAPEER.py
 def get_urls_with_retry():
     """Helper to fetch column H (transparency URLs) from sheet"""
     rows = get_agent_rows_snapshot()
-
     # Need to return full list matching row positions for combined scraper iteration
     sheet = get_sheet()
-    col_values = sheet.col_values(8)  # Assuming H is col 8
-
+    col_values = sheet.col_values(8) # Assuming H is col 8
     # strip headers
     if len(col_values) > 1:
         return col_values[1:]
-
     return []
