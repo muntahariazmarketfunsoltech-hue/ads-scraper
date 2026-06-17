@@ -64,6 +64,41 @@ def safe_update_combined_row(row_num, data):
         sheets.update_combined_row(row_num, data)
 
 
+def safe_update_column_f(row_num, value):
+    """
+    Thread-safe update for ONLY column F.
+    This keeps all other row cells unchanged.
+    """
+    with SHEET_LOCK:
+        # Preferred: add this function in sheets.py:
+        # def update_ad_type_only(row_num, value):
+        #     worksheet.update_cell(row_num, 6, value)
+        if hasattr(sheets, "update_ad_type_only"):
+            sheets.update_ad_type_only(row_num, value)
+            return
+
+        # Fallbacks if your sheets.py exposes a worksheet object directly.
+        for attr in ("worksheet", "sheet", "ws", "combined_sheet", "combined_worksheet"):
+            worksheet_obj = getattr(sheets, attr, None)
+            if worksheet_obj is None:
+                continue
+
+            if hasattr(worksheet_obj, "update_cell"):
+                worksheet_obj.update_cell(row_num, 6, value)
+                return
+
+            if hasattr(worksheet_obj, "update"):
+                try:
+                    worksheet_obj.update(f"F{row_num}", [[value]])
+                except TypeError:
+                    worksheet_obj.update([[value]], f"F{row_num}")
+                return
+
+        raise AttributeError(
+            "Column-F-only update failed. Add update_ad_type_only(row_num, value) in sheets.py."
+        )
+
+
 def safe_update_headline_desc(row_num, headline, description):
     """
     Thread-safe Google Sheet row update for Headline and Description in cols M and N.
@@ -1422,12 +1457,52 @@ def scrape_single_url(url_row):
             process_time = get_exact_time()
             has_text = is_valid_text_ad(headline, description)
 
-            # First try visible install/app link from the active creative.
+            is_image_like = has_visible_image_creative(page)
+
+            # =========================
+            # IMAGE-ONLY PATH
+            # =========================
+            # If it is an image ad and no text headline/description is available,
+            # write ONLY "image" in column F and do not update the rest of the row.
+            if not has_text and is_image_like:
+                safe_update_column_f(row_num, "image")
+
+                safe_add_log(
+                    row_number=row_num,
+                    status="IMAGE_AD_COLUMN_F_ONLY",
+                    log_type="IMAGE_AD",
+                    url=url,
+                    video_id="image",
+                    app_link="N/A",
+                    message="Image ad found. Only column F was updated with image; full row was not processed."
+                )
+
+                print(f"🖼 Row {row_num}: image ad found -> wrote only column F = image")
+                return
+
+            # For text ads, keep your existing app-link/package logic.
+            # Also keep one fallback: if no text exists but a visible package link is found,
+            # treat it as image-only and update only column F.
             visible_app_link = wait_and_extract_install_link(page, max_wait_seconds=8)
             visible_package = extract_package_name(visible_app_link)
 
-            is_image_like = has_visible_image_creative(page)
-            ad_type = "text" if has_text else "image" if (is_image_like or visible_package != "N/A") else "N/A"
+            if not has_text and visible_package != "N/A":
+                safe_update_column_f(row_num, "image")
+
+                safe_add_log(
+                    row_number=row_num,
+                    status="IMAGE_AD_COLUMN_F_ONLY",
+                    log_type="IMAGE_AD",
+                    url=url,
+                    video_id="image",
+                    app_link="N/A",
+                    message="Image ad detected from visible install link. Only column F was updated with image."
+                )
+
+                print(f"🖼 Row {row_num}: image ad detected by install link -> wrote only column F = image")
+                return
+
+            ad_type = "text" if has_text else "N/A"
 
             if not has_text and visible_package == "N/A" and not is_image_like:
                 data = [
@@ -1497,7 +1572,7 @@ def scrape_single_url(url_row):
                 url,
                 app_link,
                 process_time,
-                ad_type,      # Column F: text/image for non-video ads
+                ad_type,      # Column F: text for non-video text ads
                 process_time
             ]
 
