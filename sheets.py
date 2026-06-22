@@ -23,7 +23,13 @@ CLAIM_AGENT_COL = 9
 CLAIM_TIME_COL = 10
 CLAIM_TOKEN_COL = 11
 CLAIM_STATUS_COL = 12
-CLAIM_TTL_MINUTES = 5  # adjust to 370 for production
+
+# Batch settings
+AGENT_BATCH_SIZE = 100
+
+# Keep this long enough for one agent to process a full 100-row batch.
+# Rows are still marked DONE one-by-one immediately after processing.
+CLAIM_TTL_MINUTES = 370
 
 # Keep parallel runners allowed, but reduce same-second API bursts
 CLAIM_CONFIRM_DELAY = 0.8
@@ -187,6 +193,15 @@ def is_processed_video_value(value):
     return bool(value)
 
 
+def _first_cell_value(value_range):
+    """Safely read the first cell from a gspread get/batch_get response item."""
+    if not value_range:
+        return ""
+    if isinstance(value_range, list) and value_range and isinstance(value_range[0], list) and value_range[0]:
+        return str(value_range[0][0]).strip()
+    return ""
+
+
 # --------------------------
 # Sheet snapshot with retry
 # --------------------------
@@ -238,17 +253,34 @@ def count_unprocessed_rows():
     return sum(1 for r in rows if r["url"] and not r["processed"])
 
 
-def get_next_agent_task(direction, agent_name, run_id):
+def get_next_agent_tasks(direction, agent_name, run_id, batch_size=AGENT_BATCH_SIZE):
+    """
+    Claim up to batch_size unprocessed rows and return a list of tasks:
+        [(row_num, url), (row_num, url), ...]
+
+    Returns:
+        [] if no rows are available
+        "COLLISION_STOP" if the bottom agent should stop or a STOP flag is found
+
+    Important:
+        The caller should process each returned task and call mark_agent_done(row_num, agent_name)
+        immediately after that row finishes.
+    """
     direction = direction.lower().strip()
     if direction not in ["top", "bottom"]:
         raise ValueError("direction must be 'top' or 'bottom'")
 
-    sheet = get_sheet()  # needed to update claims
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = AGENT_BATCH_SIZE
+
+    sheet = get_sheet()
     rows = get_agent_rows_snapshot()
     unprocessed = [r for r in rows if r["url"] and not r["processed"]]
 
     if not unprocessed:
-        return None
+        return []
 
     if len(unprocessed) == 1 and direction == "bottom":
         try:
@@ -265,7 +297,13 @@ def get_next_agent_task(direction, agent_name, run_id):
 
     candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=(direction == "bottom"))
 
+    attempted_claims = []
+    updates = []
+
     for candidate in candidates:
+        if len(attempted_claims) >= batch_size:
+            break
+
         row_num = candidate["row_num"]
         url = candidate["url"]
 
@@ -273,29 +311,68 @@ def get_next_agent_task(direction, agent_name, run_id):
             print(f"🛑 {agent_name}: Stop flag detected. Stopping agent.")
             return "COLLISION_STOP"
 
+        # Skip rows actively claimed by another agent.
         if candidate["claim_agent"] and candidate["claim_agent"] != agent_name and not candidate["claim_expired"]:
             continue
 
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Claim row: one write request.
-        sheets_call(sheet.update, f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
+        attempted_claims.append({
+            "row_num": row_num,
+            "url": url,
+            "token": token,
+        })
 
-        # Small delay helps parallel agents settle before confirming the winning claim.
-        time.sleep(CLAIM_CONFIRM_DELAY)
+        updates.append({
+            "range": f"I{row_num}:L{row_num}",
+            "values": [[agent_name, claim_time, token, "CLAIMED"]],
+        })
 
-        # Confirm claim using only the token cell instead of reading the full row.
-        confirm = sheets_call(sheet.get, f"K{row_num}:K{row_num}")
-        confirmed_token = confirm[0][0].strip() if confirm and confirm[0] else ""
+    if not attempted_claims:
+        return []
 
-        if confirmed_token == token:
-            return row_num, url
+    # Claim all selected rows in one batch write.
+    sheets_call(sheet.batch_update, updates)
 
-    return None
+    # Small delay helps parallel agents settle before confirming the winning claims.
+    time.sleep(CLAIM_CONFIRM_DELAY)
+
+    # Confirm every claim token in one batch read.
+    confirm_ranges = [f"K{item['row_num']}:K{item['row_num']}" for item in attempted_claims]
+    confirm_values = sheets_call(sheet.batch_get, confirm_ranges)
+
+    confirmed_tasks = []
+    for item, value_range in zip(attempted_claims, confirm_values):
+        confirmed_token = _first_cell_value(value_range)
+        if confirmed_token == item["token"]:
+            confirmed_tasks.append((item["row_num"], item["url"]))
+
+    return confirmed_tasks
 
 
-def mark_agent_done(row_num, agent_name):
+def get_next_agent_task(direction, agent_name, run_id):
+    """
+    Backwards-compatible single-row task claim.
+    Existing code that calls get_next_agent_task() will still work.
+    """
+    tasks = get_next_agent_tasks(direction, agent_name, run_id, batch_size=1)
+
+    if tasks == "COLLISION_STOP":
+        return "COLLISION_STOP"
+
+    if not tasks:
+        return None
+
+    return tasks[0]
+
+
+def mark_agent_done(row_num, agent_name=""):
+    """
+    Mark one row as DONE immediately after it has finished processing.
+
+    Use this inside the per-row processing loop, not after the whole batch.
+    """
     try:
         sheet = get_sheet()
         sheets_call(sheet.update_cell, row_num, CLAIM_STATUS_COL, "DONE")
