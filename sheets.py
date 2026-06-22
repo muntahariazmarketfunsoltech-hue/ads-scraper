@@ -2,15 +2,22 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import config
 import time
+import random
 from datetime import datetime, timedelta
 import uuid
 
 # --------------------------
-# Cached sheet to reduce API reads
+# Cached sheet to reduce API reads/auth calls
 # --------------------------
 SHEET_CACHE = None
 SHEET_CACHE_TIME = None
-SHEET_CACHE_TTL = 60  # seconds
+SHEET_CACHE_TTL = 300  # seconds
+
+# Header cache prevents row_values(1) on every task pickup
+HEADERS_CACHE = None
+HEADERS_CACHE_TIME = None
+HEADERS_CACHE_TTL = 3600  # seconds
+HEADERS_READY = False
 
 CLAIM_AGENT_COL = 9
 CLAIM_TIME_COL = 10
@@ -18,22 +25,77 @@ CLAIM_TOKEN_COL = 11
 CLAIM_STATUS_COL = 12
 CLAIM_TTL_MINUTES = 5  # adjust to 370 for production
 
+# Keep parallel runners allowed, but reduce same-second API bursts
+CLAIM_CONFIRM_DELAY = 0.8
+
 LOG_BATCH_SIZE = 5  # batch logs to reduce API calls
 LOG_CACHE = []
-WRITE_LOGS = False 
+WRITE_LOGS = False
+
+# Retry settings for Google Sheets 429 / transient errors
+SHEETS_MAX_RETRIES = 8
+SHEETS_BASE_DELAY = 2
+SHEETS_MAX_DELAY = 60
+
+
+# --------------------------
+# Google Sheets API helpers
+# --------------------------
+def is_retryable_sheets_error(error):
+    """Return True for quota/rate limit and temporary server errors."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    text = str(error)
+
+    return (
+        status_code in (429, 500, 502, 503, 504)
+        or "Quota exceeded" in text
+        or "RESOURCE_EXHAUSTED" in text
+        or "Read requests per minute" in text
+        or "429" in text
+    )
+
+
+def sheets_call(func, *args, max_retries=SHEETS_MAX_RETRIES, **kwargs):
+    """Run a gspread call with exponential backoff and jitter."""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if not is_retryable_sheets_error(e) or attempt == max_retries - 1:
+                raise
+
+            wait = min(SHEETS_MAX_DELAY, SHEETS_BASE_DELAY * (2 ** attempt))
+            wait += random.uniform(0.5, 2.0)
+            print(f"⚠ Google Sheets quota/temporary error. Retry {attempt + 1}/{max_retries} in {wait:.1f}s")
+            time.sleep(wait)
+
+
+def column_letter(col):
+    """Convert 1-based column number to A1 column letter."""
+    result = ""
+    while col:
+        col, remainder = divmod(col - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
 # --------------------------
 # Sheet auth
 # --------------------------
 def get_sheet():
     global SHEET_CACHE, SHEET_CACHE_TIME
     now = time.time()
+
     if SHEET_CACHE and SHEET_CACHE_TIME and now - SHEET_CACHE_TIME < SHEET_CACHE_TTL:
         return SHEET_CACHE
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(config.CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(config.SPREADSHEET_ID).worksheet(config.WORKSHEET_NAME)
+
+    spreadsheet = sheets_call(client.open_by_key, config.SPREADSHEET_ID)
+    sheet = sheets_call(spreadsheet.worksheet, config.WORKSHEET_NAME)
 
     SHEET_CACHE = sheet
     SHEET_CACHE_TIME = now
@@ -44,22 +106,24 @@ def get_spreadsheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(config.CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
-    return client.open_by_key(config.SPREADSHEET_ID)
+    return sheets_call(client.open_by_key, config.SPREADSHEET_ID)
+
 
 # --------------------------
 # Logs disabled
 # --------------------------
 WRITE_LOGS = False
 
+
 def flush_logs():
-    """Logs disabled - do nothing"""
+    """Logs disabled - do nothing."""
     global LOG_CACHE
     LOG_CACHE = []
     return
 
 
 def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
-    """Logs disabled - do nothing"""
+    """Logs disabled - do nothing."""
     return
 
 
@@ -67,17 +131,45 @@ def add_log(row_number="", status="", log_type="", url="", video_id="", app_link
 # Agent helpers
 # --------------------------
 def ensure_agent_headers():
+    """Ensure agent columns exist without reading header row on every call."""
+    global HEADERS_CACHE, HEADERS_CACHE_TIME, HEADERS_READY
+
+    now = time.time()
+    if HEADERS_READY and HEADERS_CACHE and HEADERS_CACHE_TIME and now - HEADERS_CACHE_TIME < HEADERS_CACHE_TTL:
+        return HEADERS_CACHE
+
     sheet = get_sheet()
-    headers = sheet.row_values(1)
-    required = {9: "Agent", 10: "Claim Time", 11: "Claim Token", 12: "Claim Status", 13: "Headline", 14: "Description"}
+    headers = sheets_call(sheet.row_values, 1)
+
+    required = {
+        9: "Agent",
+        10: "Claim Time",
+        11: "Claim Token",
+        12: "Claim Status",
+        13: "Headline",
+        14: "Description",
+    }
+
     updates = []
     for col, name in required.items():
         current = headers[col - 1] if len(headers) >= col else ""
         if current != name:
-            col_letter = chr(64 + col) if col <= 26 else chr(64 + (col // 26)) + chr(64 + (col % 26))
-            updates.append({"range": f"{col_letter}1", "values": [[name]]})
+            updates.append({"range": f"{column_letter(col)}1", "values": [[name]]})
+
     if updates:
-        sheet.batch_update(updates)
+        sheets_call(sheet.batch_update, updates)
+
+        # Keep local cache aligned with the required headers after update.
+        max_required_col = max(required)
+        if len(headers) < max_required_col:
+            headers.extend([""] * (max_required_col - len(headers)))
+        for col, name in required.items():
+            headers[col - 1] = name
+
+    HEADERS_CACHE = headers
+    HEADERS_CACHE_TIME = now
+    HEADERS_READY = True
+    return headers
 
 
 def is_claim_expired(claim_time_text):
@@ -102,19 +194,8 @@ def get_agent_rows_snapshot():
     ensure_agent_headers()
     sheet = get_sheet()
 
-    for attempt in range(5):
-        try:
-            values = sheet.get_all_values()
-            break
-        except gspread.exceptions.APIError as e:
-            if hasattr(e, "response") and e.response.status_code == 429:
-                wait = 5 * (attempt + 1)
-                print(f"⚠ 429 rate limit hit, retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                raise
-    else:
-        raise Exception("Failed to read sheet after retries due to 429")
+    # One read for the full snapshot. Do not add separate row/column reads here.
+    values = sheets_call(sheet.get_all_values)
 
     rows = []
     for idx in range(1, len(values)):
@@ -143,8 +224,9 @@ def get_agent_rows_snapshot():
             "claim_status": claim_status,
             "stop_flag": stop_flag,
             "processed": is_processed_video_value(video_id),
-            "claim_expired": is_claim_expired(claim_time)
+            "claim_expired": is_claim_expired(claim_time),
         })
+
     return rows
 
 
@@ -170,14 +252,18 @@ def get_next_agent_task(direction, agent_name, run_id):
 
     if len(unprocessed) == 1 and direction == "bottom":
         try:
-            add_log(row_number="", status="COLLISION_STOP", log_type=agent_name,
-                    message="Only one unprocessed row left. Bottom agent stopped to avoid collision.")
+            add_log(
+                row_number="",
+                status="COLLISION_STOP",
+                log_type=agent_name,
+                message="Only one unprocessed row left. Bottom agent stopped to avoid collision.",
+            )
             flush_logs()
         except Exception:
             pass
         return "COLLISION_STOP"
 
-    candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=(direction=="bottom"))
+    candidates = sorted(unprocessed, key=lambda x: x["row_num"], reverse=(direction == "bottom"))
 
     for candidate in candidates:
         row_num = candidate["row_num"]
@@ -193,12 +279,15 @@ def get_next_agent_task(direction, agent_name, run_id):
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         claim_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Claim row
-        sheet.update(f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
+        # Claim row: one write request.
+        sheets_call(sheet.update, f"I{row_num}:L{row_num}", [[agent_name, claim_time, token, "CLAIMED"]])
 
-        # Confirm claim
-        confirm = sheet.row_values(row_num)
-        confirmed_token = confirm[10].strip() if len(confirm) >= 11 else ""
+        # Small delay helps parallel agents settle before confirming the winning claim.
+        time.sleep(CLAIM_CONFIRM_DELAY)
+
+        # Confirm claim using only the token cell instead of reading the full row.
+        confirm = sheets_call(sheet.get, f"K{row_num}:K{row_num}")
+        confirmed_token = confirm[0][0].strip() if confirm and confirm[0] else ""
 
         if confirmed_token == token:
             return row_num, url
@@ -209,38 +298,37 @@ def get_next_agent_task(direction, agent_name, run_id):
 def mark_agent_done(row_num, agent_name):
     try:
         sheet = get_sheet()
-        sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
-    except Exception:
-        pass
+        sheets_call(sheet.update_cell, row_num, CLAIM_STATUS_COL, "DONE")
+    except Exception as e:
+        print(f"⚠ Failed to mark row {row_num} done: {e}")
 
 
 def update_combined_row(row_index, data):
-    """Writes combined row data to columns A-G"""
+    """Writes combined row data to columns A-G."""
     sheet = get_sheet()
     cell_range = f"A{row_index}:G{row_index}"
     try:
-        sheet.update(cell_range, [data])
+        sheets_call(sheet.update, cell_range, [data])
     except gspread.exceptions.APIError as e:
         print(f"⚠ Failed to update row {row_index}: {e}")
 
 
 def update_headline_and_description(row_index, headline, description):
-    """Writes Headline and Description directly to columns M-N"""
+    """Writes Headline and Description directly to columns M-N."""
     sheet = get_sheet()
     cell_range = f"M{row_index}:N{row_index}"
     try:
-        sheet.update(cell_range, [[headline, description]])
+        sheets_call(sheet.update, cell_range, [[headline, description]])
     except gspread.exceptions.APIError as e:
         print(f"⚠ Failed to update headline/desc for row {row_index}: {e}")
 
+
 # Add the get_urls_with_retry helper function which was originally called in SCRAPEER.py
 def get_urls_with_retry():
-    """Helper to fetch column H (transparency URLs) from sheet"""
-    rows = get_agent_rows_snapshot()
-    # Need to return full list matching row positions for combined scraper iteration
+    """Helper to fetch column H (transparency URLs) from sheet using one read only."""
     sheet = get_sheet()
-    col_values = sheet.col_values(8) # Assuming H is col 8
-    # strip headers
-    if len(col_values) > 1:
-        return col_values[1:]
-    return []
+    values = sheets_call(sheet.get_all_values)
+
+    # Return full list matching row positions for combined scraper iteration.
+    # This replaces the old get_agent_rows_snapshot() + col_values(8) double read.
+    return [(row[7].strip() if len(row) >= 8 else "") for row in values[1:]]
