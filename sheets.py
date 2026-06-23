@@ -54,6 +54,21 @@ def get_sheet():
     SHEET_CACHE = sheet
     SHEET_CACHE_TIME = now
     return sheet
+# --------------------------
+# Logs disabled
+# --------------------------
+WRITE_LOGS = False
+
+def flush_logs():
+    """Logs disabled - do nothing"""
+    global LOG_CACHE
+    LOG_CACHE = []
+    return
+
+
+def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
+    """Logs disabled - do nothing"""
+    return
 
 
 # ==========================
