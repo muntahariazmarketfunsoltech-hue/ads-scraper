@@ -113,7 +113,7 @@ def get_agent_rows_snapshot():
         claim_time = row[9].strip() if len(row) > 9 else ""
         claim_token = row[10].strip() if len(row) > 10 else ""
         claim_status = row[11].strip() if len(row) > 11 else ""
-        stop_flag = row[12].strip() if len(row) > 12 else ""
+        stop_flag =  ""
 
         rows.append({
             "row_num": row_num,
