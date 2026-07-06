@@ -31,6 +31,14 @@ CLAIM_TTL_MINUTES = 355
 LOG_CACHE = []
 WRITE_LOGS = False
 
+# ==========================
+# FAST ROW SAFETY CACHE
+# ==========================
+# Filled by get_agent_rows_snapshot().
+# This avoids slow per-row Google Sheet reads during every write.
+ROW_URL_CACHE = {}
+DONE_ROW_CACHE = set()
+
 
 # ==========================
 # SHEET AUTH
@@ -149,12 +157,11 @@ def _strip_region(url):
     return url.rstrip("?&")
 
 
-def row_url_matches(existing_row, scrape_url):
+def url_text_matches(sheet_url, scrape_url):
     """
-    Before writing, confirm current sheet row's Column H URL
-    matches the URL being scraped.
+    Fast URL check using cached Column H URL.
     """
-    sheet_url = _clean_cell(existing_row[7]) if len(existing_row) > 7 else ""
+    sheet_url = _clean_cell(sheet_url)
     scrape_url = _clean_cell(scrape_url)
 
     if not sheet_url or not scrape_url:
@@ -170,14 +177,25 @@ def row_url_matches(existing_row, scrape_url):
     )
 
 
+def row_url_matches(existing_row, scrape_url):
+    """
+    Before writing, confirm current sheet row's Column H URL
+    matches the URL being scraped.
+    Kept for compatibility, but fast write path uses url_text_matches().
+    """
+    sheet_url = _clean_cell(existing_row[7]) if len(existing_row) > 7 else ""
+    return url_text_matches(sheet_url, scrape_url)
+
+
 # ==========================
 # SNAPSHOT (CRITICAL OPTIMIZATION)
 # ==========================
 def get_agent_rows_snapshot():
     """
     ONE FULL READ ONLY (cached for 10 seconds)
+    Also fills ROW_URL_CACHE and DONE_ROW_CACHE for fast write protection.
     """
-    global SNAPSHOT_CACHE, SNAPSHOT_TIME
+    global SNAPSHOT_CACHE, SNAPSHOT_TIME, ROW_URL_CACHE, DONE_ROW_CACHE
 
     now = time.time()
     if SNAPSHOT_CACHE and (now - SNAPSHOT_TIME) < SNAPSHOT_TTL:
@@ -200,6 +218,8 @@ def get_agent_rows_snapshot():
         raise Exception("Failed to read sheet after retries")
 
     rows = []
+    row_url_cache = {}
+    done_row_cache = set()
 
     for idx in range(1, len(values)):
         row = values[idx]
@@ -217,6 +237,12 @@ def get_agent_rows_snapshot():
         # Keeping the key for compatibility with your existing get_next_agent_task logic.
         stop_flag = ""
 
+        processed = row_has_done_output(row)
+
+        row_url_cache[row_num] = url
+        if processed:
+            done_row_cache.add(row_num)
+
         rows.append({
             "row_num": row_num,
             "url": url,
@@ -226,9 +252,12 @@ def get_agent_rows_snapshot():
             "claim_token": claim_token,
             "claim_status": claim_status,
             "stop_flag": stop_flag,
-            "processed": row_has_done_output(row),
+            "processed": processed,
             "claim_expired": is_claim_expired(claim_time)
         })
+
+    ROW_URL_CACHE = row_url_cache
+    DONE_ROW_CACHE = done_row_cache
 
     SNAPSHOT_CACHE = rows
     SNAPSHOT_TIME = now
@@ -307,25 +336,33 @@ def mark_agent_done(row_num, agent_name=None):
 # ==========================
 def update_combined_row(row_index, data):
     """
-    Protected A:G update.
-    - Does not overwrite already completed rows.
-    - Does not write when the current row URL does not match the scraped URL.
+    FAST protected A:G update.
+    Uses cached snapshot data instead of slow row_values() per row.
+
+    Protection kept:
+    - Does not overwrite rows already marked done in the snapshot.
+    - Does not write if cached Column H URL does not match scraped URL.
     - Marks Column L as DONE on successful output.
     """
+    global DONE_ROW_CACHE
+
     sheet = get_sheet()
 
     try:
-        existing_row = sheet.row_values(row_index)
+        # Make sure snapshot/cache exists.
+        if not ROW_URL_CACHE and SNAPSHOT_CACHE is None:
+            get_agent_rows_snapshot()
 
-        # Do not overwrite already completed rows.
-        if row_has_done_output(existing_row):
+        # Do not overwrite already completed rows from snapshot/current process.
+        if row_index in DONE_ROW_CACHE:
             print(f"⏭ Row {row_index}: already DONE, skipping A:G overwrite")
             return False
 
-        # Safety check: do not write if row URL does not match scraped URL.
         scrape_url = data[2] if len(data) > 2 else ""
+        sheet_url = ROW_URL_CACHE.get(row_index, "")
 
-        if not row_url_matches(existing_row, scrape_url):
+        # Safety check: do not write if row URL does not match scraped URL.
+        if not url_text_matches(sheet_url, scrape_url):
             print(f"⚠ Row {row_index}: URL mismatch, skipping A:G write")
             return False
 
@@ -333,6 +370,7 @@ def update_combined_row(row_index, data):
 
         # Mark successful rows as DONE in Column L.
         if output_data_is_success(data):
+            DONE_ROW_CACHE.add(row_index)
             try:
                 sheet.update_cell(row_index, CLAIM_STATUS_COL, "DONE")
             except Exception:
@@ -344,29 +382,15 @@ def update_combined_row(row_index, data):
         print(f"Update error: {e}")
         return False
 
-
 def update_headline_and_description(row_index, headline, description):
     """
-    Protected M:N update.
-    - Does not overwrite existing good headline/description.
+    FAST M:N update.
+    No per-row read here. This is only called after A:G write succeeds,
+    so done rows are already skipped by update_combined_row().
     """
     sheet = get_sheet()
 
     try:
-        existing = sheet.get(f"M{row_index}:N{row_index}")
-
-        old_headline = ""
-        old_description = ""
-
-        if existing and len(existing) > 0:
-            old_headline = existing[0][0] if len(existing[0]) > 0 else ""
-            old_description = existing[0][1] if len(existing[0]) > 1 else ""
-
-        # Do not overwrite existing good headline/description.
-        if is_good_done_value(old_headline) or is_good_done_value(old_description):
-            print(f"⏭ Row {row_index}: M:N already has data, skipping overwrite")
-            return False
-
         sheet.update(f"M{row_index}:N{row_index}", [[headline, description]])
         return True
 
