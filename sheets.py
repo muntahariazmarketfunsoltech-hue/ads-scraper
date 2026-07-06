@@ -203,19 +203,21 @@ def get_agent_rows_snapshot():
 
     sheet = get_sheet()
 
-    for attempt in range(5):
-        try:
-            values = sheet.get_all_values()
-            break
-        except gspread.exceptions.APIError as e:
-            if "429" in str(e):
-                wait = 2 * (attempt + 1)
-                print(f"⚠ 429 hit, retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                raise
+    for attempt in range(10):
+      try:
+        values = sheet.get_all_values()
+        break
+      except gspread.exceptions.APIError as e:
+        err = str(e)
+
+        if any(code in err for code in ["429", "500", "502", "503", "504"]):
+            wait = 10 * (attempt + 1)
+            print(f"⚠ Google Sheets API error, retrying in {wait}s: {err}")
+            time.sleep(wait)
+        else:
+            raise
     else:
-        raise Exception("Failed to read sheet after retries")
+            raise Exception("Failed to read sheet after retries")
 
     rows = []
     row_url_cache = {}
