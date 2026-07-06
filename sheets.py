@@ -23,6 +23,9 @@ CLAIM_AGENT_COL = 9
 CLAIM_TIME_COL = 10
 CLAIM_TOKEN_COL = 11
 CLAIM_STATUS_COL = 12
+
+# Safer for long scraper runs.
+# If your run can take around 5 hours, 5 minutes is too short.
 CLAIM_TTL_MINUTES = 355
 
 LOG_CACHE = []
@@ -54,10 +57,13 @@ def get_sheet():
     SHEET_CACHE = sheet
     SHEET_CACHE_TIME = now
     return sheet
+
+
 # --------------------------
 # Logs disabled
 # --------------------------
 WRITE_LOGS = False
+
 
 def flush_logs():
     """Logs disabled - do nothing"""
@@ -72,80 +78,17 @@ def add_log(row_number="", status="", log_type="", url="", video_id="", app_link
 
 
 # ==========================
-# SNAPSHOT (CRITICAL OPTIMIZATION)
-# ==========================
-def get_agent_rows_snapshot():
-    """
-    ONE FULL READ ONLY (cached for 10 seconds)
-    """
-    global SNAPSHOT_CACHE, SNAPSHOT_TIME
-
-    now = time.time()
-    if SNAPSHOT_CACHE and (now - SNAPSHOT_TIME) < SNAPSHOT_TTL:
-        return SNAPSHOT_CACHE
-
-    sheet = get_sheet()
-
-    for attempt in range(5):
-        try:
-            values = sheet.get_all_values()
-            break
-        except gspread.exceptions.APIError as e:
-            if "429" in str(e):
-                wait = 2 * (attempt + 1)
-                print(f"⚠ 429 hit, retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                raise
-    else:
-        raise Exception("Failed to read sheet after retries")
-
-    rows = []
-
-    for idx in range(1, len(values)):
-        row = values[idx]
-        row_num = idx + 1
-
-        url = row[7].strip() if len(row) > 7 else ""
-        video_id = row[5].strip() if len(row) > 5 else ""
-
-        claim_agent = row[8].strip() if len(row) > 8 else ""
-        claim_time = row[9].strip() if len(row) > 9 else ""
-        claim_token = row[10].strip() if len(row) > 10 else ""
-        claim_status = row[11].strip() if len(row) > 11 else ""
-        stop_flag =  ""
-
-    rows.append({
-    "row_num": row_num,
-    "url": url,
-    "video_id": video_id,
-    "claim_agent": claim_agent,
-    "claim_time": claim_time,
-    "claim_token": claim_token,
-    "claim_status": claim_status,
-    "stop_flag": stop_flag,
-    "processed": row_has_done_output(row),
-    "claim_expired": is_claim_expired(claim_time)
-})
-
-    SNAPSHOT_CACHE = rows
-    SNAPSHOT_TIME = now
-
-    return rows
-
-
-# ==========================
 # HELPERS
 # ==========================
-
 def is_claim_expired(claim_time_text):
     if not claim_time_text:
         return True
     try:
         t = datetime.strptime(claim_time_text, "%Y-%m-%d %H:%M:%S")
         return datetime.now() - t > timedelta(minutes=CLAIM_TTL_MINUTES)
-    except:
+    except Exception:
         return True
+
 
 BAD_DONE_VALUES = {"", "N/A", "NA", "ERROR", "NOT FOUND", "NONE", "NULL", "#N/A"}
 
@@ -165,7 +108,7 @@ def row_has_done_output(row):
     - Column L says DONE, OR
     - important output columns already have good data.
 
-    This protects rows even if Column F gets blank/removed.
+    This protects rows even if Column F is blank/removed.
     """
     claim_status = _clean_cell(row[11]) if len(row) > 11 else ""
 
@@ -225,6 +168,74 @@ def row_url_matches(existing_row, scrape_url):
         or sheet_url_clean in scrape_url_clean
         or scrape_url_clean in sheet_url_clean
     )
+
+
+# ==========================
+# SNAPSHOT (CRITICAL OPTIMIZATION)
+# ==========================
+def get_agent_rows_snapshot():
+    """
+    ONE FULL READ ONLY (cached for 10 seconds)
+    """
+    global SNAPSHOT_CACHE, SNAPSHOT_TIME
+
+    now = time.time()
+    if SNAPSHOT_CACHE and (now - SNAPSHOT_TIME) < SNAPSHOT_TTL:
+        return SNAPSHOT_CACHE
+
+    sheet = get_sheet()
+
+    for attempt in range(5):
+        try:
+            values = sheet.get_all_values()
+            break
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e):
+                wait = 2 * (attempt + 1)
+                print(f"⚠ 429 hit, retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                raise
+    else:
+        raise Exception("Failed to read sheet after retries")
+
+    rows = []
+
+    for idx in range(1, len(values)):
+        row = values[idx]
+        row_num = idx + 1
+
+        url = row[7].strip() if len(row) > 7 else ""
+        video_id = row[5].strip() if len(row) > 5 else ""
+
+        claim_agent = row[8].strip() if len(row) > 8 else ""
+        claim_time = row[9].strip() if len(row) > 9 else ""
+        claim_token = row[10].strip() if len(row) > 10 else ""
+        claim_status = row[11].strip() if len(row) > 11 else ""
+
+        # Stop flag disabled. Column M is not used as STOP anymore.
+        # Keeping the key for compatibility with your existing get_next_agent_task logic.
+        stop_flag = ""
+
+        rows.append({
+            "row_num": row_num,
+            "url": url,
+            "video_id": video_id,
+            "claim_agent": claim_agent,
+            "claim_time": claim_time,
+            "claim_token": claim_token,
+            "claim_status": claim_status,
+            "stop_flag": stop_flag,
+            "processed": row_has_done_output(row),
+            "claim_expired": is_claim_expired(claim_time)
+        })
+
+    SNAPSHOT_CACHE = rows
+    SNAPSHOT_TIME = now
+
+    return rows
+
+
 # ==========================
 # CORE TASK PICKER (FIXED)
 # ==========================
@@ -255,6 +266,7 @@ def get_next_agent_task(direction, agent_name, run_id):
     for c in candidates:
         row_num = c["row_num"]
 
+        # This stays, but stop_flag is always empty now.
         if c["stop_flag"].upper() == "STOP":
             return "COLLISION_STOP"
 
@@ -286,7 +298,7 @@ def mark_agent_done(row_num, agent_name=None):
     sheet = get_sheet()
     try:
         sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
-    except:
+    except Exception:
         pass
 
 
@@ -294,6 +306,12 @@ def mark_agent_done(row_num, agent_name=None):
 # BULK UPDATE HELPERS
 # ==========================
 def update_combined_row(row_index, data):
+    """
+    Protected A:G update.
+    - Does not overwrite already completed rows.
+    - Does not write when the current row URL does not match the scraped URL.
+    - Marks Column L as DONE on successful output.
+    """
     sheet = get_sheet()
 
     try:
@@ -328,6 +346,10 @@ def update_combined_row(row_index, data):
 
 
 def update_headline_and_description(row_index, headline, description):
+    """
+    Protected M:N update.
+    - Does not overwrite existing good headline/description.
+    """
     sheet = get_sheet()
 
     try:
