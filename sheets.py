@@ -14,19 +14,16 @@ SHEET_CACHE_TTL = 60
 
 SNAPSHOT_CACHE = None
 SNAPSHOT_TIME = 0
-SNAPSHOT_TTL = 10  # IMPORTANT: reduces API hits massively
+SNAPSHOT_TTL = 10  # reduces API hits
 
 # ==========================
 # COLUMNS
 # ==========================
-CLAIM_AGENT_COL = 9
-CLAIM_TIME_COL = 10
-CLAIM_TOKEN_COL = 11
-CLAIM_STATUS_COL = 12
-
-# Safer for long scraper runs.
-# If your run can take around 5 hours, 5 minutes is too short.
-CLAIM_TTL_MINUTES = 355
+CLAIM_AGENT_COL = 9       # I
+CLAIM_TIME_COL = 10       # J
+CLAIM_TOKEN_COL = 11      # K
+CLAIM_STATUS_COL = 12     # L
+CLAIM_TTL_MINUTES = 355   # safer for long 5h+ runs
 
 LOG_CACHE = []
 WRITE_LOGS = False
@@ -35,7 +32,7 @@ WRITE_LOGS = False
 # FAST ROW SAFETY CACHE
 # ==========================
 # Filled by get_agent_rows_snapshot().
-# This avoids slow per-row Google Sheet reads during every write.
+# Also manually filled by register_row_url() for child-process scraping.
 ROW_URL_CACHE = {}
 DONE_ROW_CACHE = set()
 
@@ -67,12 +64,9 @@ def get_sheet():
     return sheet
 
 
-# --------------------------
-# Logs disabled
-# --------------------------
-WRITE_LOGS = False
-
-
+# ==========================
+# LOGS DISABLED
+# ==========================
 def flush_logs():
     """Logs disabled - do nothing"""
     global LOG_CACHE
@@ -83,6 +77,68 @@ def flush_logs():
 def add_log(row_number="", status="", log_type="", url="", video_id="", app_link="", message=""):
     """Logs disabled - do nothing"""
     return
+
+
+# ==========================
+# RETRY HELPERS
+# ==========================
+RETRYABLE_CODES = ["429", "500", "502", "503", "504"]
+
+
+def _is_retryable_api_error(err):
+    text = str(err)
+    return any(code in text for code in RETRYABLE_CODES)
+
+
+def _retry_sleep(attempt, base_seconds=5):
+    wait = base_seconds * (attempt + 1)
+    print(f"⏳ Retry wait {wait}s", flush=True)
+    time.sleep(wait)
+
+
+def safe_update_range(sheet, range_name, values, retries=8):
+    """
+    Uses named arguments to avoid gspread deprecation warning.
+    Retries temporary Google Sheets API errors.
+    """
+    for attempt in range(retries):
+        try:
+            sheet.update(range_name=range_name, values=values)
+            return True
+        except gspread.exceptions.APIError as e:
+            if _is_retryable_api_error(e) and attempt < retries - 1:
+                print(f"⚠ Sheets update error on {range_name}, retrying: {e}", flush=True)
+                _retry_sleep(attempt)
+                continue
+            raise
+    return False
+
+
+def safe_update_cell(sheet, row, col, value, retries=8):
+    for attempt in range(retries):
+        try:
+            sheet.update_cell(row, col, value)
+            return True
+        except gspread.exceptions.APIError as e:
+            if _is_retryable_api_error(e) and attempt < retries - 1:
+                print(f"⚠ Sheets cell update error R{row}C{col}, retrying: {e}", flush=True)
+                _retry_sleep(attempt)
+                continue
+            raise
+    return False
+
+
+def get_all_values_with_retry(sheet, retries=10):
+    for attempt in range(retries):
+        try:
+            return sheet.get_all_values()
+        except gspread.exceptions.APIError as e:
+            if _is_retryable_api_error(e) and attempt < retries - 1:
+                print(f"⚠ Sheets read error, retrying: {e}", flush=True)
+                _retry_sleep(attempt, base_seconds=10)
+                continue
+            raise
+    raise Exception("Failed to read sheet after retries")
 
 
 # ==========================
@@ -112,11 +168,11 @@ def is_good_done_value(value):
 
 def row_has_done_output(row):
     """
-    Row is treated as DONE if:
+    Row is DONE if:
     - Column L says DONE, OR
     - important output columns already have good data.
 
-    This protects rows even if Column F is blank/removed.
+    This protects rows even if Column F becomes blank/removed.
     """
     claim_status = _clean_cell(row[11]) if len(row) > 11 else ""
 
@@ -158,9 +214,6 @@ def _strip_region(url):
 
 
 def url_text_matches(sheet_url, scrape_url):
-    """
-    Fast URL check using cached Column H URL.
-    """
     sheet_url = _clean_cell(sheet_url)
     scrape_url = _clean_cell(scrape_url)
 
@@ -177,22 +230,24 @@ def url_text_matches(sheet_url, scrape_url):
     )
 
 
-def row_url_matches(existing_row, scrape_url):
+def register_row_url(row_num, url):
     """
-    Before writing, confirm current sheet row's Column H URL
-    matches the URL being scraped.
-    Kept for compatibility, but fast write path uses url_text_matches().
+    Fast child-process safety:
+    lets scraper update one row without calling get_all_values()
+    in child processes.
     """
-    sheet_url = _clean_cell(existing_row[7]) if len(existing_row) > 7 else ""
-    return url_text_matches(sheet_url, scrape_url)
+    try:
+        ROW_URL_CACHE[int(row_num)] = _clean_cell(url)
+    except Exception:
+        pass
 
 
 # ==========================
-# SNAPSHOT (CRITICAL OPTIMIZATION)
+# SNAPSHOT
 # ==========================
 def get_agent_rows_snapshot():
     """
-    ONE FULL READ ONLY (cached for 10 seconds)
+    ONE FULL READ ONLY, cached.
     Also fills ROW_URL_CACHE and DONE_ROW_CACHE for fast write protection.
     """
     global SNAPSHOT_CACHE, SNAPSHOT_TIME, ROW_URL_CACHE, DONE_ROW_CACHE
@@ -202,26 +257,13 @@ def get_agent_rows_snapshot():
         return SNAPSHOT_CACHE
 
     sheet = get_sheet()
-
-    for attempt in range(5):
-        try:
-            values = sheet.get_all_values()
-            break
-        except gspread.exceptions.APIError as e:
-            if "429" in str(e):
-                wait = 2 * (attempt + 1)
-                print(f"⚠ 429 hit, retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                raise
-    else:
-        raise Exception("Failed to read sheet after retries")
+    values = get_all_values_with_retry(sheet)
 
     rows = []
     row_url_cache = {}
     done_row_cache = set()
 
-    for idx in range(1, len(values)):
+    for idx in range(1, len(values)):  # skip header
         row = values[idx]
         row_num = idx + 1
 
@@ -233,8 +275,7 @@ def get_agent_rows_snapshot():
         claim_token = row[10].strip() if len(row) > 10 else ""
         claim_status = row[11].strip() if len(row) > 11 else ""
 
-        # Stop flag disabled. Column M is not used as STOP anymore.
-        # Keeping the key for compatibility with your existing get_next_agent_task logic.
+        # Stop flag disabled. Column M is headline, not STOP.
         stop_flag = ""
 
         processed = row_has_done_output(row)
@@ -266,7 +307,8 @@ def get_agent_rows_snapshot():
 
 
 # ==========================
-# CORE TASK PICKER (FIXED)
+# CORE TASK PICKER
+# Kept for compatibility, but fast agent_runner does not use this per row.
 # ==========================
 def get_next_agent_task(direction, agent_name, run_id):
     direction = direction.lower().strip()
@@ -282,7 +324,6 @@ def get_next_agent_task(direction, agent_name, run_id):
     if not unprocessed:
         return None
 
-    # collision protection
     if len(unprocessed) == 1 and direction == "bottom":
         return "COLLISION_STOP"
 
@@ -295,7 +336,7 @@ def get_next_agent_task(direction, agent_name, run_id):
     for c in candidates:
         row_num = c["row_num"]
 
-        # This stays, but stop_flag is always empty now.
+        # stop_flag is always empty now.
         if c["stop_flag"].upper() == "STOP":
             return "COLLISION_STOP"
 
@@ -306,14 +347,11 @@ def get_next_agent_task(direction, agent_name, run_id):
         token = f"{agent_name}-{run_id}-{uuid.uuid4().hex[:10]}"
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # SINGLE WRITE ONLY (claim row)
-        sheet.update(
-            f"I{row_num}:L{row_num}",
-            [[agent_name, now, token, "CLAIMED"]]
+        safe_update_range(
+            sheet,
+            range_name=f"I{row_num}:L{row_num}",
+            values=[[agent_name, now, token, "CLAIMED"]]
         )
-
-        # ❌ REMOVED: confirm read (major quota fix)
-        # We trust write success instead of re-reading sheet
 
         return row_num, c["url"]
 
@@ -321,86 +359,95 @@ def get_next_agent_task(direction, agent_name, run_id):
 
 
 # ==========================
-# SIMPLE STATUS UPDATE
+# STATUS UPDATE
 # ==========================
 def mark_agent_done(row_num, agent_name=None):
     sheet = get_sheet()
     try:
-        sheet.update_cell(row_num, CLAIM_STATUS_COL, "DONE")
-    except Exception:
-        pass
+        safe_update_cell(sheet, row_num, CLAIM_STATUS_COL, "DONE")
+    except Exception as e:
+        print(f"⚠ Could not mark row {row_num} DONE: {e}", flush=True)
+
+
+def mark_agent_timeout(row_num):
+    sheet = get_sheet()
+    try:
+        safe_update_cell(sheet, row_num, CLAIM_STATUS_COL, "TIMEOUT")
+    except Exception as e:
+        print(f"⚠ Could not mark row {row_num} TIMEOUT: {e}", flush=True)
 
 
 # ==========================
-# BULK UPDATE HELPERS
+# UPDATE HELPERS
 # ==========================
 def update_combined_row(row_index, data):
     """
     FAST protected A:G update.
-    Uses cached snapshot data instead of slow row_values() per row.
-
-    Protection kept:
-    - Does not overwrite rows already marked done in the snapshot.
-    - Does not write if cached Column H URL does not match scraped URL.
-    - Marks Column L as DONE on successful output.
+    No per-row sheet read.
     """
     global DONE_ROW_CACHE
 
     sheet = get_sheet()
 
     try:
-        # Make sure snapshot/cache exists.
-        if not ROW_URL_CACHE and SNAPSHOT_CACHE is None:
-            get_agent_rows_snapshot()
+        # Make sure URL cache exists. In child process, scraper calls register_row_url().
+        if row_index not in ROW_URL_CACHE:
+            print(f"⚠ Row {row_index}: URL cache missing, skipping A:G write to avoid overwrite", flush=True)
+            return False
 
-        # Do not overwrite already completed rows from snapshot/current process.
         if row_index in DONE_ROW_CACHE:
-            print(f"⏭ Row {row_index}: already DONE, skipping A:G overwrite")
+            print(f"⏭ Row {row_index}: already DONE, skipping A:G overwrite", flush=True)
             return False
 
         scrape_url = data[2] if len(data) > 2 else ""
         sheet_url = ROW_URL_CACHE.get(row_index, "")
 
-        # Safety check: do not write if row URL does not match scraped URL.
         if not url_text_matches(sheet_url, scrape_url):
-            print(f"⚠ Row {row_index}: URL mismatch, skipping A:G write")
+            print(f"⚠ Row {row_index}: URL mismatch, skipping A:G write", flush=True)
             return False
 
-        sheet.update(f"A{row_index}:G{row_index}", [data])
+        safe_update_range(
+            sheet,
+            range_name=f"A{row_index}:G{row_index}",
+            values=[data]
+        )
 
-        # Mark successful rows as DONE in Column L.
         if output_data_is_success(data):
             DONE_ROW_CACHE.add(row_index)
             try:
-                sheet.update_cell(row_index, CLAIM_STATUS_COL, "DONE")
+                safe_update_cell(sheet, row_index, CLAIM_STATUS_COL, "DONE")
             except Exception:
                 pass
 
         return True
 
     except Exception as e:
-        print(f"Update error: {e}")
+        print(f"Update error on A:G row {row_index}: {e}", flush=True)
         return False
+
 
 def update_headline_and_description(row_index, headline, description):
     """
     FAST M:N update.
-    No per-row read here. This is only called after A:G write succeeds,
-    so done rows are already skipped by update_combined_row().
+    This is only called after A:G write succeeds.
     """
     sheet = get_sheet()
 
     try:
-        sheet.update(f"M{row_index}:N{row_index}", [[headline, description]])
+        safe_update_range(
+            sheet,
+            range_name=f"M{row_index}:N{row_index}",
+            values=[[headline, description]]
+        )
         return True
 
     except Exception as e:
-        print(f"Update error: {e}")
+        print(f"Update error on M:N row {row_index}: {e}", flush=True)
         return False
 
 
 # ==========================
-# OPTIMIZED URL FETCH (NO EXTRA SNAPSHOT CALL)
+# URL FETCH
 # ==========================
 def get_urls_with_retry():
     rows = get_agent_rows_snapshot()
@@ -411,9 +458,6 @@ def get_urls_with_retry():
     ]
 
 
-# ==========================
-# OPTIONAL UTILS
-# ==========================
 def count_unprocessed_rows():
     rows = get_agent_rows_snapshot()
     return sum(1 for r in rows if r["url"] and not r["processed"])
