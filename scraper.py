@@ -58,10 +58,10 @@ INSTALL_SELECTORS = [
 def safe_update_combined_row(row_num, data):
     """
     Thread-safe Google Sheet row update.
-    Browser scraping runs parallel, but sheet writing is protected.
+    Returns True if written, False if skipped.
     """
     with SHEET_LOCK:
-        sheets.update_combined_row(row_num, data)
+        return sheets.update_combined_row(row_num, data)
 
 
 def safe_update_headline_desc(row_num, headline, description):
@@ -69,7 +69,25 @@ def safe_update_headline_desc(row_num, headline, description):
     Thread-safe Google Sheet row update for Headline and Description in cols M and N.
     """
     with SHEET_LOCK:
-        sheets.update_headline_and_description(row_num, headline, description)
+        return sheets.update_headline_and_description(row_num, headline, description)
+
+
+def safe_save_result(row_num, data, headline=None, description=None):
+    """
+    Save A:G first.
+    Only save M:N if A:G write actually happened.
+    This prevents done rows from being touched again.
+    """
+    wrote = safe_update_combined_row(row_num, data)
+
+    if not wrote:
+        print(f"⏭ Row {row_num}: skipped save because row is already done or URL mismatch")
+        return False
+
+    if headline is not None and description is not None:
+        safe_update_headline_desc(row_num, headline, description)
+
+    return True
 
 
 def safe_add_log(row_number, status, log_type, url="", video_id="", app_link="", message=""):
@@ -1395,8 +1413,7 @@ def scrape_single_url(url_row):
                     video_time
                 ]
 
-                safe_update_combined_row(row_num, data)
-                safe_update_headline_desc(row_num, headline, description)
+                safe_save_result(row_num, data, headline, description)
 
                 safe_add_log(
                     row_number=row_num,
@@ -1440,8 +1457,7 @@ def scrape_single_url(url_row):
                     process_time
                 ]
 
-                safe_update_combined_row(row_num, data)
-                safe_update_headline_desc(row_num, "N/A", "N/A")
+                safe_save_result(row_num, data, "N/A", "N/A")
 
                 safe_add_log(
                     row_number=row_num,
@@ -1501,8 +1517,12 @@ def scrape_single_url(url_row):
                 process_time
             ]
 
-            safe_update_combined_row(row_num, data)
-            safe_update_headline_desc(row_num, headline if has_text else "N/A", description if has_text else "N/A")
+            safe_save_result(
+                row_num,
+                data,
+                headline if has_text else "N/A",
+                description if has_text else "N/A"
+            )
 
             safe_add_log(
                 row_number=row_num,
@@ -1531,8 +1551,7 @@ def scrape_single_url(url_row):
                     error_time
                 ]
 
-                safe_update_combined_row(row_num, data)
-                safe_update_headline_desc(row_num, "N/A", "N/A")
+                safe_save_result(row_num, data, "N/A", "N/A")
             except Exception:
                 pass
 
@@ -1553,19 +1572,17 @@ def scrape_single_url(url_row):
             browser.close()
 
 def run_parallel_combined_scraper(max_workers=2):
-    urls = sheets.get_urls_with_retry()
-
     url_rows = [
-        (i + 2, u.strip())
-        for i, u in enumerate(urls)
-        if u and u.strip()
+        (row_num, url.strip())
+        for row_num, url in sheets.get_urls_with_retry()
+        if url and url.strip()
     ]
 
     if not url_rows:
-        print("No transparency URLs found in column H.")
+        print("No pending transparency URLs found in column H.")
         return
 
-    print(f"🚀 Starting combined VIDEO + TEXT scraper for {len(url_rows)} rows")
+    print(f"🚀 Starting combined VIDEO + TEXT scraper for {len(url_rows)} pending rows")
     print(f"⚡ Running parallel with max_workers={max_workers}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
