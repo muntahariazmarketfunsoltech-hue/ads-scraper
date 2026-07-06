@@ -1319,6 +1319,13 @@ def has_visible_image_creative(page):
 def scrape_single_url(url_row):
     row_num, url = url_row
 
+    # Register row URL locally so protected writes can validate row mapping
+    # without doing a slow per-row Google Sheets read.
+    try:
+        sheets.register_row_url(row_num, url)
+    except Exception:
+        pass
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
